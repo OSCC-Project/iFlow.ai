@@ -1,0 +1,118 @@
+# metric_define.yaml
+# 指标提取规则配置：定义每个电路从仿真输出中提取哪些指标、从哪取、怎么算
+
+circuits:
+  # ── 默认数字电路指标 (任何未定义电路名都用这个) ──
+  _default:
+    metrics:
+      wns:
+        source: "sta"
+        expression: "wns"
+        unit: "ns"
+        description: "最差负时序裕量"
+      tns:
+        source: "sta"
+        expression: "tns"
+        unit: "ns"
+        description: "总负时序裕量"
+      leakage:
+        source: "sta"
+        expression: "leakage_power"
+        unit: "W"
+        description: "静态泄漏功耗"
+      area:
+        source: "sta"
+        expression: "total_area"
+        unit: "um^2"
+        description: "总面积"
+
+  TwoStageAmp:
+    # 该电路需要提取的指标列表
+    metrics:
+      gain:
+        source: "ac"                              # 从 AC 分析中取数据
+        expression: "max(20 * log10(v(out) / v(in)))"  # 计算电压增益（dB）
+        unit: "dB"
+        description: "低频开环增益"
+      gbw:
+        source: "ac"
+        expression: "cross(gain, 0)"              # 单位增益带宽（增益降为 0dB 时的频率）
+        unit: "Hz"
+        description: "单位增益带宽"
+      pm:
+        source: "ac"
+        expression: "180 + phase_at_unity_gain"   # 相位裕度
+        unit: "deg"
+        description: "相位裕度"
+      power:
+        source: "dc"                              # 从 DC 分析中取数据
+        expression: "v(vdd) * i(vdd)"             # 功耗 = 电压 × 电流
+        unit: "W"
+        description: "静态功耗"
+      sr:
+        source: "tran"                            # 从瞬态分析中取数据
+        expression: "slew_rate(v(out), 10%, 90%)" # 压摆率（10%-90% 上升沿）
+        unit: "V/s"
+        description: "压摆率"
+
+  LDO:
+    metrics:
+      dropout:
+        source: "dc"
+        expression: "v(in) - v(out)"
+        unit: "V"
+        description: "压差电压"
+      load_reg:
+        source: "dc"
+        expression: "(v(out)_no_load - v(out)_full_load) / v(out)_no_load"
+        unit: "%"
+        description: "负载调整率"
+      psrr:
+        source: "ac"
+        expression: "20 * log10(v(out) / v(in_ac))"
+        unit: "dB"
+        description: "电源抑制比"
+      iq:
+        source: "dc"
+        expression: "i(vdd)"
+        unit: "A"
+        description: "静态电流"
+
+  # 数字电路（门级 sizing 场景）
+  GCD:  # Greatest Common Divisor 测试电路
+    metrics:
+      wns:
+        source: "sta"                             # 数字侧从 STA 报告中取
+        expression: "wns"                         # 直接取 STA 报告的 WNS 字段
+        unit: "ns"
+        description: "最差负时序裕量"
+      tns:
+        source: "sta"
+        expression: "tns"
+        unit: "ns"
+        description: "总负时序裕量"
+      leakage:
+        source: "sta"
+        expression: "leakage_power"
+        unit: "W"
+        description: "静态泄漏功耗"
+      area:
+        source: "sta"
+        expression: "total_area"
+        unit: "um^2"
+        description: "总面积"
+
+  # 扩展新的模拟电路只需要在 circuits 下新增一个条目
+  # Bandgap:
+  #   metrics:
+  #     temp_coeff:
+  #       source: "dc"
+  #       expression: "(v_ref(85) - v_ref(-40)) / (85 - (-40))"
+  #       unit: "ppm/°C"
+
+  # 扩展新的数字电路同理
+  # AES_core:
+  #   metrics:
+  #     wns:
+  #       source: "sta"
+  #       expression: "wns"

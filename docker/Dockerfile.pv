@@ -1,0 +1,22 @@
+# 物理验证镜像: Netgen (LVS)
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 基础依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential python3 python3-pip tcl tcl-dev tk tk-dev \
+    git curl ca-certificates libx11-dev mesa-common-dev libglu1-mesa-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Netgen (从源码编译，apt 版本可能过旧)
+RUN git clone --depth 1 https://github.com/RTimothyEdwards/netgen.git /opt/netgen \
+    && cd /opt/netgen \
+    && ./configure && make -j$(nproc) && make install \
+    && rm -rf /opt/netgen
+
+# 验证安装
+RUN netgen -batch quit
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

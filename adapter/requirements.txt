@@ -1,0 +1,7 @@
+# adapter Python 依赖
+# 只包含 adapter/ 目录下实际 import 的第三方包
+
+pyyaml>=6.0
+pydantic>=2.0
+mcp>=1.0
+jinja2>=3.0

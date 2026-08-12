@@ -1,0 +1,407 @@
+{
+  "experiment": {
+    "id": "d7b6c00b",
+    "design": "gcd",
+    "variables": {
+      "\u5de5\u827a (PDK)": "sky130, nangate45",
+      "\u5229\u7528\u7387": "35%, 30%"
+    },
+    "combos": [
+      {
+        "id": "7f4119",
+        "config": {
+          "\u5de5\u827a (PDK)": "sky130",
+          "\u5229\u7528\u7387": "35%"
+        },
+        "status": "done",
+        "result": {
+          "results": [
+            {
+              "step": "verible_lint",
+              "status": "done",
+              "start": 1786214046.2295175,
+              "success": true,
+              "violations": 0,
+              "duration": 0.007
+            },
+            {
+              "step": "verilator_lint",
+              "status": "done",
+              "start": 1786214046.236064,
+              "success": false,
+              "errors": 1,
+              "duration": 0.033
+            },
+            {
+              "step": "yosys_synth",
+              "status": "skipped",
+              "start": 1786214046.2693279,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            },
+            {
+              "step": "ista_sta",
+              "status": "skipped",
+              "start": 1786214046.2693303,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            }
+          ]
+        }
+      },
+      {
+        "id": "875368",
+        "config": {
+          "\u5de5\u827a (PDK)": "sky130",
+          "\u5229\u7528\u7387": "30%"
+        },
+        "status": "done",
+        "result": {
+          "results": [
+            {
+              "step": "verible_lint",
+              "status": "done",
+              "start": 1786214046.2693615,
+              "success": true,
+              "violations": 0,
+              "duration": 0.002
+            },
+            {
+              "step": "verilator_lint",
+              "status": "done",
+              "start": 1786214046.271511,
+              "success": false,
+              "errors": 1,
+              "duration": 0.033
+            },
+            {
+              "step": "yosys_synth",
+              "status": "skipped",
+              "start": 1786214046.3048947,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            },
+            {
+              "step": "ista_sta",
+              "status": "skipped",
+              "start": 1786214046.304897,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            }
+          ]
+        }
+      },
+      {
+        "id": "e715d4",
+        "config": {
+          "\u5de5\u827a (PDK)": "nangate45",
+          "\u5229\u7528\u7387": "35%"
+        },
+        "status": "done",
+        "result": {
+          "results": [
+            {
+              "step": "verible_lint",
+              "status": "done",
+              "start": 1786214046.3049247,
+              "success": true,
+              "violations": 0,
+              "duration": 0.002
+            },
+            {
+              "step": "verilator_lint",
+              "status": "done",
+              "start": 1786214046.3067815,
+              "success": false,
+              "errors": 1,
+              "duration": 0.033
+            },
+            {
+              "step": "yosys_synth",
+              "status": "skipped",
+              "start": 1786214046.3395123,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            },
+            {
+              "step": "ista_sta",
+              "status": "skipped",
+              "start": 1786214046.3395162,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            }
+          ]
+        }
+      },
+      {
+        "id": "37666c",
+        "config": {
+          "\u5de5\u827a (PDK)": "nangate45",
+          "\u5229\u7528\u7387": "30%"
+        },
+        "status": "done",
+        "result": {
+          "results": [
+            {
+              "step": "verible_lint",
+              "status": "done",
+              "start": 1786214046.339557,
+              "success": true,
+              "violations": 0,
+              "duration": 0.002
+            },
+            {
+              "step": "verilator_lint",
+              "status": "done",
+              "start": 1786214046.3417017,
+              "success": false,
+              "errors": 1,
+              "duration": 0.034
+            },
+            {
+              "step": "yosys_synth",
+              "status": "skipped",
+              "start": 1786214046.3755581,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            },
+            {
+              "step": "ista_sta",
+              "status": "skipped",
+              "start": 1786214046.3755634,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            }
+          ]
+        }
+      }
+    ],
+    "total": 4,
+    "completed": 4,
+    "status": "done",
+    "created_at": 1786214046.2271671,
+    "results": [
+      {
+        "combo_id": "7f4119",
+        "config": {
+          "\u5de5\u827a (PDK)": "sky130",
+          "\u5229\u7528\u7387": "35%"
+        },
+        "result": {
+          "results": [
+            {
+              "step": "verible_lint",
+              "status": "done",
+              "start": 1786214046.2295175,
+              "success": true,
+              "violations": 0,
+              "duration": 0.007
+            },
+            {
+              "step": "verilator_lint",
+              "status": "done",
+              "start": 1786214046.236064,
+              "success": false,
+              "errors": 1,
+              "duration": 0.033
+            },
+            {
+              "step": "yosys_synth",
+              "status": "skipped",
+              "start": 1786214046.2693279,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            },
+            {
+              "step": "ista_sta",
+              "status": "skipped",
+              "start": 1786214046.2693303,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            }
+          ]
+        }
+      },
+      {
+        "combo_id": "875368",
+        "config": {
+          "\u5de5\u827a (PDK)": "sky130",
+          "\u5229\u7528\u7387": "30%"
+        },
+        "result": {
+          "results": [
+            {
+              "step": "verible_lint",
+              "status": "done",
+              "start": 1786214046.2693615,
+              "success": true,
+              "violations": 0,
+              "duration": 0.002
+            },
+            {
+              "step": "verilator_lint",
+              "status": "done",
+              "start": 1786214046.271511,
+              "success": false,
+              "errors": 1,
+              "duration": 0.033
+            },
+            {
+              "step": "yosys_synth",
+              "status": "skipped",
+              "start": 1786214046.3048947,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            },
+            {
+              "step": "ista_sta",
+              "status": "skipped",
+              "start": 1786214046.304897,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            }
+          ]
+        }
+      },
+      {
+        "combo_id": "e715d4",
+        "config": {
+          "\u5de5\u827a (PDK)": "nangate45",
+          "\u5229\u7528\u7387": "35%"
+        },
+        "result": {
+          "results": [
+            {
+              "step": "verible_lint",
+              "status": "done",
+              "start": 1786214046.3049247,
+              "success": true,
+              "violations": 0,
+              "duration": 0.002
+            },
+            {
+              "step": "verilator_lint",
+              "status": "done",
+              "start": 1786214046.3067815,
+              "success": false,
+              "errors": 1,
+              "duration": 0.033
+            },
+            {
+              "step": "yosys_synth",
+              "status": "skipped",
+              "start": 1786214046.3395123,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            },
+            {
+              "step": "ista_sta",
+              "status": "skipped",
+              "start": 1786214046.3395162,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            }
+          ]
+        }
+      },
+      {
+        "combo_id": "37666c",
+        "config": {
+          "\u5de5\u827a (PDK)": "nangate45",
+          "\u5229\u7528\u7387": "30%"
+        },
+        "result": {
+          "results": [
+            {
+              "step": "verible_lint",
+              "status": "done",
+              "start": 1786214046.339557,
+              "success": true,
+              "violations": 0,
+              "duration": 0.002
+            },
+            {
+              "step": "verilator_lint",
+              "status": "done",
+              "start": 1786214046.3417017,
+              "success": false,
+              "errors": 1,
+              "duration": 0.034
+            },
+            {
+              "step": "yosys_synth",
+              "status": "skipped",
+              "start": 1786214046.3755581,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            },
+            {
+              "step": "ista_sta",
+              "status": "skipped",
+              "start": 1786214046.3755634,
+              "reason": "experiment mode: \u4ec5 lint \u6b65\u9aa4",
+              "duration": 0.0
+            }
+          ]
+        }
+      }
+    ],
+    "finished_at": 1786214046.3755713
+  },
+  "summary": {
+    "rows": [
+      {
+        "combo": {
+          "\u5de5\u827a (PDK)": "sky130",
+          "\u5229\u7528\u7387": "35%"
+        },
+        "lint_violations": 0,
+        "verible_lint_duration": 0.007,
+        "verilator_lint_duration": 0.033,
+        "yosys_synth_duration": 0.0,
+        "ista_sta_duration": 0.0
+      },
+      {
+        "combo": {
+          "\u5de5\u827a (PDK)": "sky130",
+          "\u5229\u7528\u7387": "30%"
+        },
+        "lint_violations": 0,
+        "verible_lint_duration": 0.002,
+        "verilator_lint_duration": 0.033,
+        "yosys_synth_duration": 0.0,
+        "ista_sta_duration": 0.0
+      },
+      {
+        "combo": {
+          "\u5de5\u827a (PDK)": "nangate45",
+          "\u5229\u7528\u7387": "35%"
+        },
+        "lint_violations": 0,
+        "verible_lint_duration": 0.002,
+        "verilator_lint_duration": 0.033,
+        "yosys_synth_duration": 0.0,
+        "ista_sta_duration": 0.0
+      },
+      {
+        "combo": {
+          "\u5de5\u827a (PDK)": "nangate45",
+          "\u5229\u7528\u7387": "30%"
+        },
+        "lint_violations": 0,
+        "verible_lint_duration": 0.002,
+        "verilator_lint_duration": 0.034,
+        "yosys_synth_duration": 0.0,
+        "ista_sta_duration": 0.0
+      }
+    ],
+    "columns": [
+      "combo",
+      "lint_violations",
+      "verible_lint_duration",
+      "verilator_lint_duration",
+      "yosys_synth_duration",
+      "ista_sta_duration"
+    ]
+  }
+}

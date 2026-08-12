@@ -1,0 +1,24 @@
+# 综合镜像: Yosys + SymbiYosys
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Yosys (apt 安装)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    yosys yosys-dev python3 python3-pip build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# SymbiYosys (apt 安装 + solver 依赖)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    symbiyosys \
+    yices2 boolector z3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python 绑定
+RUN pip3 install --break-system-packages pyosys
+
+# 验证安装
+RUN yosys --version && sby --version
+
+WORKDIR /workspace
+CMD ["/bin/bash"]

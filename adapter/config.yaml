@@ -1,0 +1,166 @@
+# config.yaml
+# Adapter 模块运行时配置：工具路径、超时、并行数、后端选型等
+
+# ============================================================
+# 一、后端（Backend）配置
+# ============================================================
+backend:
+  primetime:
+    executable: "/usr/local/bin/pt_shell"
+    template_dir: "./templates/commercial/"
+    timeout_seconds: 3600
+  # ---------- 模拟侧 ----------
+  analog:
+    # 主选仿真器
+    simulator: "ngspice"                          # ngspice / xyce / spectre（仅 ngspice 经实测验证）
+    simulator_path: "/usr/bin/ngspice"            # 可执行文件路径
+    version_required: ">= 42"                     # AnalogGym 要求 v42+
+    
+    # 运行参数
+    timeout_seconds: 600                          # 单次仿真超时（秒），模拟电路通常较慢
+    parallel_jobs: 8                              # 并行仿真进程数（spicelib SimRunner 并发数）
+    working_dir: "./tmp/analog_runs"              # 临时文件存放目录
+    
+    # 网表模板路径
+    netlist_templates: "./templates/analog/"
+    
+    # 后端驱动库
+    driver: "spicelib"                            # 目前仅 spicelib 经实测验证
+    
+  # ---------- 数字侧 ----------
+  digital:
+    working_dir: "./tmp/digital_runs"
+    # ----- 综合（Yosys） -----
+    synthesis:
+      tool: "yosys"
+      yosys_path: "/usr/bin/yosys"
+      python_binding: "pyosys"                    # 优先使用 Python 绑定
+      fallback_to_cli: true                       # 若 pyosys 编译失败，降级为 subprocess 调用 yosys -p
+      timeout_seconds: 120
+
+    # ----- 时序分析（主选） -----
+    sta_primary:
+      tool: "iSTA"                                # 通过 ieda_py in-process 调用
+      python_module: "ieda_py"                    # import 路径
+      # 若 iSTA 三步验证失败，切换为下面的兼容后端
+
+    # ----- 时序分析（兼容后端，兜底） -----
+    sta_compatible:
+      tool: "OpenSTA"
+      executable: "/usr/local/bin/opensta"        # Tcl 可执行文件路径
+      call_method: "subprocess"                   # 子进程 + Tcl 脚本 + 文本解析
+      timeout_seconds: 300
+      # 使用场景：仅用于 ICCAD 官方评估脚本对齐，不用于日常优化循环
+    # ----- STA 验证 -----
+    sta_validation:
+      enabled: true
+      results_dir: "./outputs/sta_validation/"
+      
+  # ---------- OpenROAD 数字物理设计 ----------
+  openroad:
+    executable: "/usr/bin/openroad"
+    script_dir: ""
+    working_dir: "./tmp/openroad_runs/"
+    timeout_per_step: 1800
+    # sky130 HD PDK 路径
+    pdk:
+      tech_lef: "/home/xu/OpenROAD-ae191807/test/sky130hd/sky130hd.tlef"
+      cell_lef: "/home/xu/OpenROAD-ae191807/test/sky130hd/sky130hd_std_cell.lef"
+      liberty: "/home/xu/OpenROAD-ae191807/test/sky130hd/sky130hd_tt.lib"
+      tracks: "/home/xu/OpenROAD-ae191807/test/sky130hd/sky130hd.tracks"
+      vars: "/home/xu/OpenROAD-ae191807/test/sky130hd/sky130hd.vars"
+      site: "unithd"
+      hor_layer: "met3"
+      ver_layer: "met2"
+    # 物理默认参数 (小设计用, 大设计需覆盖)
+    defaults:
+      die_area: "0 0 150 150"
+      core_area: "10 10 140 140"
+    # 多 Corner 库 (sign-off)
+    corners:
+      TYP:
+        liberty: "/home/xu/OpenROAD-ae191807/test/sky130hd/sky130hd_tt.lib"
+        voltage: 1.80
+        temp: 25
+      SLOW:
+        liberty: "/home/xu/OpenROAD-ae191807/test/sky130hd/sky130_fd_sc_hd__ss_n40C_1v40.lib"
+        voltage: 1.60
+        temp: 125
+      FAST:
+        liberty: "/home/xu/OpenROAD-ae191807/test/sky130hd/sky130_fd_sc_hd__ff_n40C_1v95.lib"
+        voltage: 2.00
+        temp: -40
+
+  # ---------- GDS 生成 ----------
+  gds:
+    def2gds_script: "/home/xu/iFlow/scripts/common/def2gds_gdstk.py"
+    gds_dir: "/home/xu/iFlow/foundry/sky130/gds"
+    working_dir: "./tmp/gds_runs/"
+
+  # ---------- OpenSTA 独立 STA ----------
+  opensta:
+    executable: "/usr/bin/sta"
+    working_dir: "./tmp/opensta_runs/"
+    timeout_seconds: 300
+
+  # ---------- iEDA 数字全流程 ----------
+  ieda:
+    # iEDA 可执行文件路径
+    ieda_bin: "/home/xu/iEDA/bin/iEDA"
+    # Tcl 脚本目录（sky130_gcd 已有脚本）
+    script_dir: "/home/xu/iEDA/scripts/design/sky130_gcd/script"
+    # iEDA 设计目录（Tcl 脚本运行时的工作目录）
+    design_dir: "/home/xu/iEDA/scripts/design/sky130_gcd"
+    # 工艺/PDK 目录
+    foundry_dir: "/home/xu/iEDA/scripts/foundry/sky130"
+    # iEDA 配置目录
+    config_dir: "/home/xu/iEDA/scripts/design/sky130_gcd/iEDA_config"
+    # 运行目录
+    working_dir: "./tmp/ieda_runs/"
+    # 单步超时（秒）
+    timeout_per_step: 1800
+    # 是否使用 AiEDA Python 绑定（需要 AiEDA 安装）
+    use_aieda_binding: false
+    # 默认流程步骤
+    flows:
+      - "floorplan"
+      - "fixFanout"
+      - "placement"
+      - "CTS"
+      - "optDrv"
+      - "optHold"
+      - "legalization"
+      - "routing"
+      - "filler"
+
+# ============================================================
+# 二、指标提取（MetricDefine）
+# ============================================================
+metric_define:
+  config_path: "./config/metric_define.yaml"      # 指标提取规则文件路径
+  schema_validation: true                         # 是否启用 Pydantic Schema 校验
+
+# ============================================================
+# 三、通用配置
+# ============================================================
+general:
+  # 日志
+  logging:
+    level: "INFO"                                 # DEBUG / INFO / WARNING / ERROR
+    file: "./logs/adapter.log"
+    format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    
+  # 缓存
+  cache:
+    enabled: true
+    backend: "sqlite"                             # 缓存仿真结果，避免重复跑
+    cache_db: "./cache/adapter_cache.db"
+    ttl_seconds: 86400                            # 24 小时有效期
+    
+  # 路径
+  paths:
+    pdk:
+      sky130: "/opt/pdk/sky130"
+      ASAP7: "/opt/pdk/asap7"
+    output_dir: "./outputs/"
+    temp_dir: "./tmp/"

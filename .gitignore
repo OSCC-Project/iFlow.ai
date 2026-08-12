@@ -1,0 +1,11 @@
+node_modules/
+.next/
+__pycache__/
+*.pyc
+tmp/
+outputs/
+.env
+server/settings.json
+frontend/.next/
+*.log
+frontend/node_modules/

@@ -1,0 +1,124 @@
+# iflow-lab 实训平台 Docker Compose 编排
+# Phase 1: 工具容器 + AI 容器
+version: "3.8"
+
+services:
+  # ============================================================
+  # 仿真容器: Icarus + Verilator + Verible + Surfer
+  # ============================================================
+  sim:
+    image: iflow-lab/sim:latest
+    container_name: iflow-sim
+    volumes:
+      - workspace_data:/workspace
+      - ./rtl:/workspace/rtl:ro          # 用户 RTL (只读)
+    working_dir: /workspace
+    command: ["tail", "-f", "/dev/null"] # 保持运行, API 通过 docker exec 调用
+    restart: unless-stopped
+    networks:
+      - iflow-net
+
+  # ============================================================
+  # 综合容器: Yosys + SymbiYosys
+  # ============================================================
+  syn:
+    image: iflow-lab/syn:latest
+    container_name: iflow-syn
+    volumes:
+      - workspace_data:/workspace
+    working_dir: /workspace
+    command: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
+    networks:
+      - iflow-net
+
+  # ============================================================
+  # 物理验证容器: Netgen (LVS)
+  # ============================================================
+  pv:
+    image: iflow-lab/pv:latest
+    container_name: iflow-pv
+    volumes:
+      - workspace_data:/workspace
+    working_dir: /workspace
+    command: ["tail", "-f", "/dev/null"]
+    restart: unless-stopped
+    networks:
+      - iflow-net
+
+  # ============================================================
+  # AI 容器: vLLM 双 Agent (ChipMATE-V + ChipMATE-P)
+  # ============================================================
+  ai-v:
+    image: vllm/vllm-openai:latest
+    container_name: iflow-ai-v
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - model_data:/models
+    ports:
+      - "8001:8001"
+    command: >
+      --model /models/ChipMATE-V-9B
+      --port 8001
+      --host 0.0.0.0
+      --dtype auto
+      --max-model-len 4096
+      --gpu-memory-utilization 0.45
+    restart: unless-stopped
+    networks:
+      - iflow-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  ai-p:
+    image: vllm/vllm-openai:latest
+    container_name: iflow-ai-p
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - model_data:/models
+    ports:
+      - "8002:8002"
+    command: >
+      --model /models/ChipMATE-P-9B
+      --port 8002
+      --host 0.0.0.0
+      --dtype auto
+      --max-model-len 4096
+      --gpu-memory-utilization 0.45
+    restart: unless-stopped
+    networks:
+      - iflow-net
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+# ============================================================
+# 数据卷
+# ============================================================
+volumes:
+  workspace_data:
+    driver: local
+  model_data:
+    driver: local
+
+# ============================================================
+# 网络
+# ============================================================
+networks:
+  iflow-net:
+    driver: bridge
