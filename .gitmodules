@@ -1,0 +1,3 @@
+[submodule "iEDA"]
+	path = iEDA
+	url = https://github.com/OSCC-Project/iEDA.git
