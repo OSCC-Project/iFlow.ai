@@ -7,6 +7,11 @@
 ## 快速开始
 
 ```bash
+# 0. 克隆仓库 (含 submodule)
+git clone --recurse-submodules https://github.com/OSCC-Project/iFlow.ai.git
+# 或已克隆后补拉 submodule:
+# git submodule update --init --recursive
+
 # 1. 安装 EDA 工具
 sudo bash docker/setup_tools.sh
 
