@@ -45,7 +45,9 @@ class ExperimentRunner:
             # _run_id 注入组合 ID: WS 进度按组合推送 (前端 /ws/exp_{exp_id}_{combo_id})
             run_config = dict(combo["config"])
             run_config["_run_id"] = f"exp_{exp_id}_{combo_id}"
-            result = self.run_flow(exp["design"], run_config)
+            # 多设计对比: design 作为变量时覆盖实验默认设计 (方案 5.2.1 变量模型)
+            design = run_config.get("design", exp["design"])
+            result = self.run_flow(design, run_config)
             combo["status"] = "done"
             combo["result"] = result
             exp["completed"] += 1

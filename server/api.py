@@ -277,7 +277,6 @@ def _execute_flow_steps(flow: dict, rtl_paths: list, tb_path: str, run_id: str,
         "result_dir": f"/home/xu/ic_agent_os/tmp/ieda_runs/{run_id}/result",
         "sdc_path": "",
     }
-    or_gds = ""  # OpenROAD 路径的 GDS (供 gds_export 步骤消费)
 
     def run_ieda(flows_list: list, **extra) -> dict:
         """统一的 iEDA 调用: 共享 RUN_DIR/RESULT_DIR, 首次生成 SDC"""
@@ -494,9 +493,8 @@ def _execute_flow_steps(flow: dict, rtl_paths: list, tb_path: str, run_id: str,
                         "CLK_PERIOD": clk_period,
                         "DIE_AREA": die, "CORE_AREA": core,
                     }, "/home/xu/ic_agent_os/tmp/openroad_runs")
-                    ok = bool(r.get("success")) and bool(r.get("gds_path"))
-                    if r.get("gds_path"):
-                        or_gds = r["gds_path"]
+                    # 成功 = 流程完成 + 产出布线 DEF (GDS 由后续 gds_export 步骤用 iEDA 转换)
+                    ok = bool(r.get("success")) and bool(r.get("def_path"))
                     step_result.update({"status": "done" if ok else "failed", "success": ok,
                                         "metrics": _clean_metrics(r.get("metrics", {})),
                                         "gds_path": r.get("gds_path", ""),
@@ -1449,10 +1447,38 @@ def _keyword_parse(message: str) -> dict:
 class ExperimentReq(BaseModel):
     design: str = "gcd"
     variables: dict = {}  # {"PDK": "sky130,nangate45", "utilization": "35%,30%,25%"}
+    design_uploads: dict = {}    # {设计名: RTL 代码} — 用户自主添加设计
+    liberty_uploads: dict = {}   # {工艺名: liberty 内容} — 用户自主添加工艺 (PPA 对比)
 
 @app.post("/api/experiment/create")
 def api_experiment_create(req: ExperimentReq):
     exp = experiment_runner.create(req.design, req.variables)
+    # 用户上传的设计/工艺落盘到工作区 (白名单内), 注入组合配置供执行器消费
+    rtl_paths, lib_paths = {}, {}
+    up_dir = "/tmp/iflow_workspace/experiments"
+    os.makedirs(up_dir, exist_ok=True)
+    for name, code in (req.design_uploads or {}).items():
+        safe = re.sub(r'[^\w\-.]', '_', name)
+        p = os.path.join(up_dir, f"{safe}.v")
+        with open(p, "w") as f:
+            f.write(code)
+        rtl_paths[name] = p
+        rtl_paths[safe] = p
+    lib_dir = "/tmp/iflow_workspace/pdk_libs"
+    os.makedirs(lib_dir, exist_ok=True)
+    for name, content in (req.liberty_uploads or {}).items():
+        safe = re.sub(r'[^\w\-.]', '_', name)
+        p = os.path.join(lib_dir, f"{safe}.lib")
+        with open(p, "w") as f:
+            f.write(content)
+        lib_paths[name] = p
+        lib_paths[safe] = p
+    for combo in exp["combos"]:
+        c = combo["config"]
+        if c.get("design") in rtl_paths:
+            c["rtl_path"] = rtl_paths[c["design"]]
+        if str(c.get("PDK", "")) in lib_paths:
+            c["liberty_path"] = lib_paths[c["PDK"]]
     return exp
 
 @app.post("/api/experiment/{exp_id}/run")
