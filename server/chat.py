@@ -37,11 +37,14 @@ class ChatSession:
                 data=data,
                 headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
             )
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            # P2-8: deepseek-reasoner 实测 17s+, 30s 易超时 → 90s
+            with urllib.request.urlopen(req, timeout=90) as resp:
                 body = json.loads(resp.read())
                 reply = body["choices"][0]["message"]["content"]
         except Exception as e:
-            reply = f"(AI 调用失败: {e})"
+            # P2-8: 调用失败不写入历史 (避免把错误注入上下文), 也不伪造 assistant 回复
+            self.history.pop()  # 回滚刚 append 的用户消息, 下次可重试
+            return {"reply": f"(AI 调用失败: {e})", "action": None}
 
         self.history.append({"role": "assistant", "content": reply})
 

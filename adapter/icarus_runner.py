@@ -71,12 +71,19 @@ class IcarusRunner(Backend):
         stderr = sr.stderr
 
         # 提取 $display/$monitor 输出
-        assertions_ok = "FAIL" not in stdout and "Error" not in stdout
-        assertions_failed = len(re.findall(r"FAIL|Error|ERROR", stdout))
+        # P2-8: 逐行匹配断言标记, 避免信号名 error / "No Error" 文案误判
+        fail_count = 0
+        for line in stdout.splitlines():
+            if re.search(r"\bFAIL(?:ED)?\b", line):
+                fail_count += 1
+            elif "Error" in line and "No Error" not in line and "no error" not in line.lower():
+                fail_count += 1
+        assertions_ok = fail_count == 0
+        assertions_failed = fail_count
 
-        # 提取仿真时间
+        # 提取仿真时间 — P2-8: 行首 #10 时 group(1) 为 None, 分别取组
         time_match = re.search(r"(\d+)\s*ns|#(\d+)", stdout)
-        sim_time = time_match.group(1) if time_match else "unknown"
+        sim_time = (time_match.group(1) or time_match.group(2)) if time_match else "unknown"
 
         # 检查 VCD 是否生成
         vcd_generated = os.path.exists(vcd_file) and os.path.getsize(vcd_file) > 0

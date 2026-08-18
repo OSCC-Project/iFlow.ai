@@ -1,5 +1,6 @@
 'use client'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 
 const components: any = {
   p: ({children}:any) => <p className="mb-1 last:mb-0">{children}</p>,
@@ -24,5 +25,6 @@ const components: any = {
 }
 
 export default function Markdown({ text }: { text: string }) {
-  return <ReactMarkdown components={components}>{text}</ReactMarkdown>
+  // remark-gfm: 启用表格/删除线/任务列表 (AI 回复大量使用 markdown 表格)
+  return <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{text}</ReactMarkdown>
 }

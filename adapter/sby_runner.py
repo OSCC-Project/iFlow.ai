@@ -63,7 +63,7 @@ class SBYRunner(Backend):
 
         # ---- 3. 解析结果 ----
         output = r.stdout + r.stderr
-        result = self._parse_result(output, mode, depth)
+        result = self._parse_result(output, mode, depth, run_dir=run_dir)
 
         # 确保使用新版本 Yosys
         new_yosys = os.path.expanduser("~/.local/bin/yosys")
@@ -117,23 +117,25 @@ class SBYRunner(Backend):
 
         return "\n".join(lines)
 
-    def _parse_result(self, output: str, mode: str, depth: int) -> dict:
+    def _parse_result(self, output: str, mode: str, depth: int, run_dir: str = "") -> dict:
         """解析 sby 输出 — 提取可读结论"""
+        # 去 ANSI 颜色码/不可见字符: "DONE (ESC[32mPASS..." 会破坏匹配
+        output = re.sub(r'\x1b\[[0-9;]*m', '', output)
+        output = ''.join(c for c in output if c.isprintable() or c in '\n')
         verdict = "UNKNOWN"
         summary = ""
 
-        if "DONE (PASS)" in output or "successful proof" in output:
+        if re.search(r'DONE\s*\(\s*PASS', output) or "successful proof" in output:
             verdict = "PASS"
-            summary = f"✅ 证明通过 (k-induction) — 所有 property 在深度 {depth} 内成立"
-        elif "DONE (FAIL)" in output or "Status: failed" in output:
+            summary = f"✅ 证明通过 (BMC) — 所有 property 在深度 {depth} 内成立"
+        elif re.search(r'DONE\s*\(\s*FAIL', output) or re.search(r'Status:\s*failed', output):
             verdict = "FAIL"
-            # 尝试提取反例
-            cex = re.search(r"Counterexample:?(.*?)(?:\n\n|\Z)", output, re.DOTALL)
+            summary = f"❌ 证明失败 — 在深度 {depth} 内找到反例"
+            # 方案 P1-3: 附带"失败的是哪条 property" + 反例输入序列
+            cex = self._parse_cex_details(output, run_dir)
             if cex:
-                summary = f"❌ 证明失败 — 找到反例。在深度 {depth} 内 property 被违反。\n反例: {cex.group(1)[:200]}"
-            else:
-                summary = f"❌ 证明失败 — 在深度 {depth} 内找到反例"
-        elif "ERROR" in output:
+                summary += "\n" + cex
+        elif re.search(r'\bERROR\b', output):
             verdict = "ERROR"
             err = re.search(r"ERROR:?(.*?)(?:\n|\Z)", output)
             summary = f"⚠️ 运行错误: {err.group(1).strip() if err else '未知错误'}"
@@ -153,3 +155,61 @@ class SBYRunner(Backend):
             "assertions_passed": len(re.findall(r"PASS|pass|proved", output)),
             "assertions_failed": len(re.findall(r"FAIL|violation|CEX", output)),
         }
+
+    def _parse_cex_details(self, output: str, run_dir: str) -> str:
+        """解析反例细节: 失败断言原文 + 反例输入激励序列"""
+        parts = []
+        # 1. 失败断言位置: "Assert failed in counter: /path/file.v:12.54-12.76 (...)"
+        m = re.search(r'Assert failed in \w+: (\S+):(\d+)\.(\d+)-(\d+)', output)
+        if m:
+            src_path, line_no = m.group(1), int(m.group(2))
+            sva_line = ""
+            for cand in (src_path,
+                         os.path.join(run_dir, "check_bmc", "src", os.path.basename(src_path))):
+                try:
+                    with open(cand) as f:
+                        lines = f.read().splitlines()
+                    if 0 < line_no <= len(lines):
+                        sva_line = lines[line_no - 1].strip()
+                    break
+                except OSError:
+                    continue
+            if sva_line:
+                parts.append(f"失败的断言 (第{line_no}行): {sva_line[:160]}")
+        # 2. 反例输入序列 (trace_tb.v 中的 state/输入赋值)
+        tb_path = os.path.join(run_dir, "check_bmc", "engine_0", "trace_tb.v")
+        if os.path.exists(tb_path):
+            try:
+                content = open(tb_path).read()
+            except OSError:
+                content = ""
+            states = []
+            cur = None
+            for line in content.splitlines():
+                sm = re.search(r'// state (\d+)', line)
+                if sm:
+                    cur = {"inputs": {}}
+                    states.append(cur)
+                    continue
+                if cur is not None:
+                    # 值字面量: 1'b0 / 4'b1000 / 5 / 4'd7 → 按进制转十进制
+                    im = re.search(r'PI_(\w+)\s*(?:<=|=)\s*(\d+)\'([bdh])([0-9a-fA-F_]+)', line)
+                    if im:
+                        try:
+                            cur["inputs"][im.group(1)] = str(int(im.group(4).replace('_', ''),
+                                                               {'b': 2, 'd': 10, 'h': 16}[im.group(3)]))
+                        except (ValueError, KeyError):
+                            cur["inputs"][im.group(1)] = im.group(4)
+                        continue
+                    im2 = re.search(r'PI_(\w+)\s*(?:<=|=)\s*(\d+)\s*;', line)
+                    if im2:
+                        cur["inputs"][im2.group(1)] = im2.group(2)
+            # 反例发生在哪个 state (从 logfile 的 "Assert failed ... step N" 推断)
+            step_m = re.search(r'Assert failed[^\n]*step (\d+)', output)
+            fail_step = int(step_m.group(1)) if step_m else (len(states) - 1 if states else -1)
+            if states:
+                seq = " → ".join(f"[{', '.join(f'{k}={v}' for k, v in s['inputs'].items())}]"
+                                 for s in states[: max(fail_step + 1, 3)])
+                mark = f"\n反例输入序列 (含导致失败的第{fail_step}拍): {seq}" if fail_step >= 0 else f"\n反例输入序列: {seq}"
+                parts.append(mark.strip())
+        return "\n".join(parts)

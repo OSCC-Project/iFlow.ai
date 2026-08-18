@@ -1,3 +1,7 @@
 @import "tailwindcss";
 :root { --background: #0a0a0a; --foreground: #ededed; }
 body { background: var(--background); color: var(--foreground); font-family: system-ui, sans-serif; }
+
+/* 覆盖率热力图: Monaco 行级标注 (绿=已覆盖, 红=未覆盖) */
+.cov-hit { background: rgba(34, 197, 94, 0.18); }
+.cov-miss { background: rgba(239, 68, 68, 0.25); }

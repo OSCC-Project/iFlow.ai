@@ -166,11 +166,19 @@ class DigitalRunner(Backend):
 
             ys.run("opt")
             ys.run("clean")
-            ys.run(f"write_verilog {netlist_path}")
+            if liberty:
+                # 面积指标 (Chip area for module ...) — 收敛历史图/PPA 数据源
+                ys.run(f"stat -liberty {liberty}")
+            # -noattr: 网表供 iEDA/OpenSTA 消费, (* src = ... *) 属性会让 iEDA 解析器崩溃
+            ys.run(f"write_verilog -noattr {netlist_path}")
+            try:
+                log = ys.log() or ""
+            except Exception:
+                log = ""  # pyosys API 差异: 拿不到日志就留空, 不影响综合结果
 
             return {
                 "netlist_path": netlist_path,
-                "stdout": "",
+                "stdout": log[-4000:],
                 "stderr": "",
                 "method": "pyosys_inprocess",
             }
@@ -218,7 +226,11 @@ class DigitalRunner(Backend):
             else:
                 ys_commands.append("# abc skipped: no liberty file")
 
-            ys_commands.extend(["opt; clean", f"write_verilog {netlist_path}"])
+            ys_commands.append("opt; clean")
+            if liberty:
+                # 面积指标 (Chip area for module ...) — 收敛历史图/PPA 数据源
+                ys_commands.append(f"stat -liberty {liberty}")
+            ys_commands.append(f"write_verilog -noattr {netlist_path}")
             with open(ys_script_path, "w") as f:
                 f.write("\n".join(ys_commands))
 

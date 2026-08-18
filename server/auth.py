@@ -1,5 +1,5 @@
 """JWT 用户认证"""
-import hashlib, secrets, time, sqlite3
+import hashlib, secrets, time, sqlite3, os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -14,8 +14,28 @@ class AuthManager:
 
     def __init__(self, db_path: str = "./server/users.db", secret: str = ""):
         self.db_path = db_path
-        self.secret = secret or secrets.token_hex(32)
+        # 密钥持久化: 每次进程随机密钥会导致重启后所有密码失效
+        self.secret = secret or self._load_or_create_secret()
         self._init_db()
+
+    def _load_or_create_secret(self) -> str:
+        secret_path = os.path.join(os.path.dirname(os.path.abspath(self.db_path)),
+                                   ".auth_secret")
+        try:
+            if os.path.exists(secret_path):
+                with open(secret_path) as f:
+                    s = f.read().strip()
+                if s:
+                    return s
+        except OSError:
+            pass
+        s = secrets.token_hex(32)
+        try:
+            with open(secret_path, "w") as f:
+                f.write(s)
+        except OSError:
+            pass
+        return s
 
     def _init_db(self):
         with sqlite3.connect(self.db_path) as db:

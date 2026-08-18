@@ -9,3 +9,6 @@ server/settings.json
 frontend/.next/
 *.log
 frontend/node_modules/
+server/.auth_secret
+server/users.db
+server/experiments/

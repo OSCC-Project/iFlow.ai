@@ -9,8 +9,8 @@ export default function Home() {
   const [flows, setFlows] = useState<any[]>([])
 
   useEffect(() => {
-    fetch(`${API}/api/health`).then(r => r.json()).then(setHealth)
-    fetch(`${API}/api/flows`).then(r => r.json()).then(setFlows)
+    fetch(`${API}/api/health`).then(r => r.json()).then(setHealth).catch(() => {})
+    fetch(`${API}/api/flows`).then(r => r.json()).then(d => setFlows(Array.isArray(d) ? d : [])).catch(() => {})
   }, [])
 
   return (

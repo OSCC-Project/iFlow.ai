@@ -145,7 +145,11 @@ class IEDARunner(Backend):
         self.design_dir = config.get("design_dir", "")
 
         # ---- 流程控制 ----
-        self.flows = config.get("flows", self.DEFAULT_FLOW)
+        flows_cfg = config.get("flows") or (config.get("ieda") or {}).get("flows")
+        self.flows = flows_cfg or self.DEFAULT_FLOW
+
+        # ---- 强制 subprocess (跳过 in-process ieda_py) ----
+        self.force_subprocess = config.get("force_subprocess", False)
 
         # ---- AiEDA Python 绑定（可选） ----
         self.use_aieda = config.get("use_aieda_binding", False)
@@ -159,11 +163,14 @@ class IEDARunner(Backend):
         """运行 iEDA 数字全流程（S2: 优先 ieda_py in-process）。"""
 
         # ── 尝试 ieda_py in-process（S2 合规）──
-        ieda_py = _get_ieda_py()
-        if ieda_py is not None:
-            inproc_result = self._try_inprocess(circuit_name, params)
-            if inproc_result is not None:
-                return inproc_result
+        # 仅 floorplan/sta 有 in-process 实现; 其余步骤必须走 subprocess,
+        # 否则 in-process 会"空转成功" (假成功)。
+        if not self.force_subprocess:
+            ieda_py = _get_ieda_py()
+            if ieda_py is not None:
+                inproc_result = self._try_inprocess(circuit_name, params)
+                if inproc_result is not None:
+                    return inproc_result
 
         # ── 降级: subprocess ──
         return self._execute_subprocess(circuit_name, params)
@@ -177,6 +184,10 @@ class IEDARunner(Backend):
         Returns:
             成功时返回结果字典，失败时返回 None（触发降级到 subprocess）
         """
+        # in-process 只实现了 floorplan / sta; 其余 flow 会空转, 直接降级
+        requested = set(params.get("flows", self.flows))
+        if not requested.issubset({"floorplan", "sta"}):
+            return None
         result_dir = params.get("RESULT_DIR", f"/tmp/ieda_inproc/{uuid4().hex[:8]}")
         os.makedirs(result_dir, exist_ok=True)
 
@@ -194,8 +205,8 @@ class IEDARunner(Backend):
         return None  # 触发降级到 subprocess
 
     def _execute_subprocess(self, circuit_name: str, params: dict) -> dict:
-        run_id = str(uuid4())[:8]
-        run_dir = f"{self.working_dir}/{run_id}/"
+        # RUN_DIR 允许同一设计的多步骤共享输出目录 (DEF 链传)
+        run_dir = params.get("RUN_DIR") or f"{self.working_dir}/{uuid4().hex[:8]}/"
         os.makedirs(run_dir, exist_ok=True)
 
         # ---- 设置环境变量 ----
@@ -243,20 +254,48 @@ class IEDARunner(Backend):
                 all_stderr += f"\n=== {step} TIMEOUT ===\n"
 
         # ---- 解析 STA 结果 ----
-        sta_report_path = os.path.join(
-            run_dir, params.get("RESULT_DIR", "result"), "sta", "timing.rpt"
-        )
-        if os.path.exists(sta_report_path):
-            sta_metrics = self._parse_sta_report(sta_report_path)
-        else:
+        # iSTA 报告实际名为 {design}.rpt (表格格式), 也可能为 timing.rpt/log
+        result_dir = params.get("RESULT_DIR", f"{run_dir}/result")
+        sta_report_path = ""
+        sta_metrics = {}
+        candidates = []
+        sta_dir = os.path.join(result_dir, "sta")
+        if os.path.isdir(sta_dir):
+            candidates += [os.path.join(sta_dir, n) for n in ("timing.rpt", "timing.log")]
+            candidates += [os.path.join(sta_dir, fn) for fn in sorted(os.listdir(sta_dir))
+                           if fn.endswith(".rpt")]
+        for cand in candidates:
+            # iEDA init_sta -output 可能把 timing.log 建成目录 → 只解析文件
+            if os.path.isfile(cand):
+                sta_report_path = cand
+                sta_metrics = self._parse_sta_report(cand)
+                # 通用关键词解析不到 → 尝试 iSTA 表格格式
+                if sta_metrics["wns"] != sta_metrics["wns"]:  # NaN
+                    try:
+                        with open(cand) as f:
+                            extra = self._parse_ista_table(f.read())
+                        for k, v in extra.items():
+                            if v == v:  # 非 NaN 才覆盖
+                                sta_metrics[k] = v
+                    except OSError:
+                        pass
+                break
+        if not sta_report_path:
             # 尝试从 stdout 中解析 WNS/TNS
             sta_metrics = self._parse_sta_from_stdout(all_stdout)
+
+        # ---- 解析 DRC 结果 ----
+        drc_metrics = {}
+        if any("drc" in f.lower() for f in flows):
+            drc_metrics = self._parse_drc_result(result_dir, all_stdout)
 
         return {
             "run_dir": run_dir,
             "netlist_path": params.get("NETLIST_FILE", ""),
             "sta_report": sta_report_path,
             "sta": sta_metrics,
+            "drc": drc_metrics,
+            "success": flow_success,
             "stdout": all_stdout,
             "stderr": all_stderr,
             "returncode": 0 if flow_success else 1,
@@ -288,7 +327,11 @@ class IEDARunner(Backend):
             "DESIGN_TOP": params.get("DESIGN_TOP", "gcd"),
             "NETLIST_FILE": params.get("NETLIST_FILE", ""),
             "SDC_FILE": params.get("SDC_FILE", ""),
+            # db_init_sdc.tcl 读取 SDC_PATH
+            "SDC_PATH": params.get("SDC_PATH", params.get("SDC_FILE", "")),
             "SPEF_FILE": params.get("SPEF_FILE", ""),
+            "INPUT_DEF": params.get("INPUT_DEF", ""),
+            "GDS_FILE": params.get("GDS_FILE", ""),
             "DIE_AREA": params.get("DIE_AREA", "0.0 0.0 150.0 150.0"),
             "CORE_AREA": params.get("CORE_AREA", "10.0 10.0 140.0 140.0"),
             "FOUNDRY_DIR": foundry_dir,
@@ -315,6 +358,7 @@ class IEDARunner(Backend):
         "groute":       "iRT_script/run_iRT.tcl",
         "droute":       "iRT_script/run_iRT.tcl",       # 同 iRT
         "filler":       "iPL_script/run_iPL_filler.tcl",
+        "drc":          "iDRC_script/run_iDRC.tcl",
         "gds":          "DB_script/run_def_to_gds_text.tcl",
         # 旧名兼容
         "placement":    "iPL_script/run_iPL.tcl",
@@ -329,6 +373,13 @@ class IEDARunner(Backend):
         优先使用已有的 iEDA Tcl 脚本，降级为自动生成。
         """
         os.makedirs(f"{run_dir}/scripts", exist_ok=True)
+
+        # STA 指定 INPUT_DEF 时生成专用脚本 (官方脚本硬编码 iPL_result.def)
+        if step.lower() == "sta" and params.get("INPUT_DEF"):
+            tcl_path = f"{run_dir}/scripts/run_iSTA_input.tcl"
+            with open(tcl_path, "w") as f:
+                f.write(self._generate_sta_input_tcl())
+            return tcl_path
 
         # 如果 script_dir 已配置，按映射查找已有脚本
         if self.script_dir:
@@ -351,6 +402,57 @@ class IEDARunner(Backend):
             return tcl_path
 
         return ""
+
+    def _generate_sta_input_tcl(self) -> str:
+        """生成读取指定 DEF 的 iSTA 脚本 (与官方 run_iSTA.tcl 等价,
+        但 def_init 使用 INPUT_DEF 环境变量)。注意必须用 run_sta 单命令
+        (init_sta + report_sta 组合会在 set_instance_flip_flop 段错误)。"""
+        return """
+#===========================================================
+##   init flow config
+#===========================================================
+flow_init -config $::env(CONFIG_DIR)/flow_config.json
+
+#===========================================================
+##   read db config
+#===========================================================
+db_init -config $::env(CONFIG_DIR)/db_default_config.json -output_dir_path $::env(RESULT_DIR)
+
+#===========================================================
+##   reset data path
+#===========================================================
+source $::env(TCL_SCRIPT_DIR)/DB_script/db_path_setting.tcl
+
+#===========================================================
+##   reset lib
+#===========================================================
+source $::env(TCL_SCRIPT_DIR)/DB_script/db_init_lib.tcl
+
+#===========================================================
+##   reset sdc
+#===========================================================
+source $::env(TCL_SCRIPT_DIR)/DB_script/db_init_sdc.tcl
+
+#===========================================================
+##   read lef
+#===========================================================
+source $::env(TCL_SCRIPT_DIR)/DB_script/db_init_lef.tcl
+
+#===========================================================
+##   read def (输入 DEF 由 INPUT_DEF 指定)
+#===========================================================
+def_init -path $::env(INPUT_DEF)
+
+#===========================================================
+##   run STA
+#===========================================================
+run_sta -output $::env(RESULT_DIR)/sta/
+
+#===========================================================
+##   Exit
+#===========================================================
+flow_exit
+""".strip()
 
     def _generate_default_tcl(self, step: str) -> str:
         """为指定步骤生成默认 Tcl 脚本。
@@ -451,7 +553,7 @@ save_def "$::env(RESULT_DIR)/gcd_final.def"
         try:
             with open(report_path, "r") as f:
                 content = f.read()
-        except (FileNotFoundError, PermissionError):
+        except OSError:
             return metrics
 
         # WNS
@@ -514,3 +616,71 @@ save_def "$::env(RESULT_DIR)/gcd_final.def"
                         metrics["wns"] = val
 
         return metrics
+
+    def _parse_ista_table(self, content: str) -> dict:
+        """解析 iSTA 表格报告 (iEDA 输出, 如 gcd.rpt):
+        - 端点表: | Endpoint | Clock Group | Delay Type | ... | Slack | Freq |
+          Delay Type: max=setup / min=hold — 只有这两类行是端点汇总行;
+          路径明细行 (如 library setup time) 的 Slack 列是路径分量 (与频率无关),
+          混入会把恒定的分量值当成 WNS
+        - TNS 表: | Clock | Delay Type | TNS |"""
+        metrics = {"wns": float("nan"), "tns": float("nan"),
+                   "leakage_power": float("nan"), "total_area": float("nan")}
+        setup_slacks, hold_slacks = [], []
+        for line in content.split("\n"):
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            # 列序: Endpoint | Clock Group | Delay Type | ... | Slack | Freq
+            if len(cells) >= 7 and cells[2] in ("max", "min"):
+                try:
+                    (setup_slacks if cells[2] == "max" else hold_slacks).append(float(cells[6]))
+                except ValueError:
+                    pass
+        if setup_slacks:
+            metrics["wns"] = min(setup_slacks)
+        if hold_slacks:
+            metrics["hold_wns"] = min(hold_slacks)
+        tns_vals = []
+        for line in content.split("\n"):
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if len(cells) == 3 and cells[0].lower() != "clock":
+                try:
+                    tns_vals.append(float(cells[2]))  # TNS 列
+                except ValueError:
+                    pass
+        if tns_vals:
+            metrics["tns"] = min(tns_vals)
+        return metrics
+
+    def _parse_drc_result(self, result_dir: str, stdout: str) -> dict:
+        """解析 iEDA DRC 结果 — 从 detail.json / drc.rpt / stdout 统计违规数。"""
+        # 1. detail.json (iDRC 输出: {"drc": {"number": N}} 或违规列表)
+        detail_path = os.path.join(result_dir, "drc", "detail.json")
+        if os.path.exists(detail_path):
+            try:
+                import json
+                with open(detail_path) as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    n = len(data)
+                else:
+                    n = data.get("drc", {}).get("number")
+                return {"violations": n, "source": "detail.json"}
+            except Exception:
+                pass
+        # 2. drc.rpt 文本报告
+        for rpt_name in ("drc.rpt", "drc.report"):
+            rpt_path = os.path.join(result_dir, "report", rpt_name)
+            if os.path.exists(rpt_path):
+                with open(rpt_path) as f:
+                    content = f.read()
+                m = re.search(r'[Tt]otal\s+violations?\s*[:\s]+(\d+)', content)
+                if m:
+                    return {"violations": int(m.group(1)), "source": rpt_name}
+                return {"violations": 0, "source": rpt_name}
+        # 3. stdout 兜底: 统计 violation 关键字
+        n = sum(1 for line in stdout.split("\n") if "violation" in line.lower())
+        return {"violations": n, "source": "stdout"} if n else {"violations": None, "source": "none"}

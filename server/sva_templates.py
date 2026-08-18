@@ -19,6 +19,7 @@ class RTLStructure:
     fifo_like: bool = False                               # FIFO 特征
     has_default_case: bool = False                        # case 语句有 default 吗
     arith_ops: list[str] = field(default_factory=list)    # 算术运算: + - *
+    reset_vals: dict = field(default_factory=dict)        # 寄存器复位值 {reg: "4'b1111"}
 
 
 def analyze_rtl(code: str) -> RTLStructure:
@@ -51,19 +52,60 @@ def analyze_rtl(code: str) -> RTLStructure:
     # 过滤掉复位信号
     s.enables = [e for e in enables if e not in s.resets and e not in s.clocks][:5]
 
-    # 计数器: q <= q + 1 模式
-    counter_pattern = re.findall(r'(\w+)\s*<=\s*(\w+)\s*\+\s*(\d+)', code)
-    for cnt in counter_pattern:
-        if cnt[0] == cnt[1]:  # q <= q + N
-            # 检测位宽
-            width = 4  # 默认
-            wm = re.search(rf'(?:reg|wire|output)\s*\[(\d+):(\d+)\]\s*{cnt[0]}', code)
-            if wm:
-                width = max(int(wm.group(1)), int(wm.group(2))) + 1
-            else:
-                wm = re.search(rf'{cnt[0]}.*?\[(\d+):(\d+)\]', code)
-                if wm: width = max(int(wm.group(1)), int(wm.group(2))) + 1
-            s.counters.append({"name": cnt[0], "inc_expr": cnt[2], "width": width})
+    # 计数器: q <= q + 1 / q <= q + 4'd1 / q <= q + 4'b1 (递增)
+    # 以及递减: q <= q - 4'b0001 (减计数器)
+    lit_re = r'(\w+)\s*<=\s*(\w+)\s*[+\-]\s*(\d+)(?:\'([bdh])([0-9a-fA-F]+))?'
+    for cnt in re.findall(lit_re, code):
+        if cnt[0] != cnt[1]:
+            continue
+        if cnt[3]:
+            try:
+                inc = str(int(cnt[4], {'b': 2, 'd': 10, 'h': 16}[cnt[3].lower()]))
+            except (ValueError, KeyError):
+                inc = cnt[2]
+        else:
+            inc = cnt[2]
+        # 方向: 计数器自赋值行 (count <= count ± N) 出现 '-' → 递减
+        line = next((l for l in code.split('\n')
+                     if f'{cnt[0]} <=' in l and f'<= {cnt[0]}' in l), '')
+        dec = ('-' in line)
+        # 检测位宽
+        width = 4  # 默认
+        wm = re.search(rf'(?:reg|wire|output)\s*\[(\d+):(\d+)\]\s*{cnt[0]}', code)
+        if wm:
+            width = max(int(wm.group(1)), int(wm.group(2))) + 1
+        else:
+            wm = re.search(rf'{cnt[0]}.*?\[(\d+):(\d+)\]', code)
+            if wm: width = max(int(wm.group(1)), int(wm.group(2))) + 1
+        s.counters.append({"name": cnt[0], "inc_expr": inc, "width": width, "dec": dec})
+
+    # 计数器使能: 计数器自赋值行向前找最近的 if 条件 (else if (en) 与赋值可能分行)
+    # 避免把同块的其它控制信号 (如 load) 误当使能
+    lines = code.split('\n')
+    for c in s.counters:
+        for i, line in enumerate(lines):
+            if f'{c["name"]} <=' in line and f'<= {c["name"]}' in line:
+                for back in range(i - 1, max(i - 5, -1), -1):
+                    m = re.search(r'(?:else\s+)?if\s*\(\s*(\w+)\s*\)', lines[back])
+                    if m:
+                        c["en"] = m.group(1)
+                        break
+                break
+
+    # 复位分支赋值: if (!rst_n) ... reg <= VALUE (支持复位到非零值, 如 4'b1111)
+    reset_vals: dict = {}
+    in_reset = False
+    for line in code.split('\n'):
+        stripped = line.strip()
+        if re.search(r'if\s*\(\s*[!~]\s*\w+\s*\)', stripped):
+            in_reset = True
+            continue
+        if in_reset and re.search(r'\belse\b', stripped):
+            in_reset = False
+        m = re.search(r'(\w+)\s*<=\s*([^;]+);', stripped)
+        if m and in_reset:
+            reset_vals[m.group(1)] = m.group(2).strip()
+    s.reset_vals = reset_vals
 
     # FSM 状态 (parameter/localparam)
     state_params = re.findall(r'(?:parameter|localparam)\s+(\w+)\s*=\s*(\d+)', code)
@@ -112,8 +154,12 @@ TEMPLATES = [
         "condition": lambda s: len(s.resets) > 0 and len(s.registers) > 0,
         "priority": 1,
         "generate": lambda s: [
-            f"// 复位后 {reg} 清零\n"
-            f"always @(posedge {s.clocks[0]}) if (!{s.resets[0]}) assert ({reg} == 0);"
+            # $initstate: 排除初始态 (初始态 anyinit 任意, 复位未生效)
+            # 用 $past(rst_n) 判定"上一拍复位生效": 同步复位设计中 rst_n=0 的
+            # 当前拍寄存器还是旧值 (下一拍才复位), 用当前拍会误报
+            # 复位值从 RTL 提取 (支持复位到非零值, 如 4'b1111); 提取不到则按 0
+            f"// 复位生效后 {reg} 保持复位值 ({s.reset_vals.get(reg, '0')})\n"
+            f"always @(posedge {s.clocks[0]}) if (!$initstate && !$past({s.resets[0]})) assert ({reg} == {s.reset_vals.get(reg, '0')});"
             for reg in s.registers[:1]
         ],
     },
@@ -123,15 +169,35 @@ TEMPLATES = [
         "condition": lambda s: len(s.enables) > 0 and len(s.counters) > 0,
         "priority": 2,
         "generate": lambda s: [
-            f"// 使能关闭时 {c['name']} 保持不变\n"
-            f"always @(posedge {s.clocks[0]}) if ({s.resets[0] if s.resets else '1'} && !{s.enables[0]}) "
-            f"assert ({c['name']} == $past({c['name']}));"
-            for c in s.counters[:1]
+            # 转换关系式 (单 property 覆盖保持/递增|递减/回绕), 经 SBY BMC 实测通过:
+            # - 全部用 $past 采样上一拍 (q 的更新使用上一拍的 en, 不能混用当前拍)
+            # - $initstate 排除初始态 ($past 初值 anyinit 任意)
+            # - rst_n && $past(rst_n) 排除复位沿 (异步复位建模为同步)
+            # - 本 yosys build 的 formal frontend 只支持 always 块内 immediate
+            #   assertion, 不支持 assert property/|->/disable iff
+            # - 递增回绕: 满值 +1 → 0; 递减回绕: 0 -1 → 满值
+            (
+                f"// {c['name']} 转换关系: 使能时递减(允许回绕), 关闭时保持\n"
+                f"always @(posedge {s.clocks[0]}) if (!$initstate && {s.resets[0]} && $past({s.resets[0]})) "
+                f"assert ($past({c.get('en') or s.enables[0]}) ? "
+                f"({c['name']} == $past({c['name']}) - {c['inc_expr']} || "
+                f"({c['name']} == {c.get('width',4)}'d{(1<<c.get('width',4))-1} && $past({c['name']}) == 0)) : "
+                f"{c['name']} == $past({c['name']}));"
+                if c.get('dec') else
+                f"// {c['name']} 转换关系: 使能时递增(允许回绕), 关闭时保持\n"
+                f"always @(posedge {s.clocks[0]}) if (!$initstate && {s.resets[0]} && $past({s.resets[0]})) "
+                f"assert ($past({c.get('en') or s.enables[0]}) ? "
+                f"({c['name']} == $past({c['name']}) + {c['inc_expr']} || "
+                f"({c['name']} == 0 && $past({c['name']}) == {c.get('width',4)}'d{(1<<c.get('width',4))-1})) : "
+                f"{c['name']} == $past({c['name']}));"
+            )
+            for c in s.counters[:1] if c.get('inc_expr') == '1'
         ] + [
-            f"// 使能开启时 {c['name']} 递增(允许回绕)\n"
-            f"always @(posedge {s.clocks[0]}) if ({s.resets[0] if s.resets else '1'} && {s.enables[0]}) "
-            f"assert ({c['name']} == $past({c['name']}) + 1'b1 || ({c['name']} == 0 && $past({c['name']}) == {c.get('width',4)}'d{(1<<c.get('width',4))-1}));"
-            for c in s.counters[:1] if s.enables
+            # 递增/递减步长非 1 时: 只检查使能关闭时保持
+            f"// 使能关闭时 {c['name']} 保持不变 (首拍保护)\n"
+            f"always @(posedge {s.clocks[0]}) if (!$initstate && {s.resets[0]} && $past({s.resets[0]}) && "
+            f"!$past({c.get('en') or s.enables[0]})) assert ({c['name']} == $past({c['name']}));"
+            for c in s.counters[:1] if c.get('inc_expr') != '1'
         ],
     },
     {
@@ -150,8 +216,10 @@ TEMPLATES = [
         "condition": lambda s: bool(s.handshake),
         "priority": 2,
         "generate": lambda s: [
-            f"// valid 有效时 ready 必须在同一拍响应\n"
-            f"always @(posedge {s.clocks[0]}) assert (##1 $stable({s.handshake['valid'][0]}) || {s.handshake['ready'][0]});"
+            # 本 yosys build 不支持 ##1/$stable → 用 $past 表达 "valid 拉起后一拍内 ready 响应"
+            f"// valid 拉起后 ready 必须响应 (首拍保护)\n"
+            f"always @(posedge {s.clocks[0]}) if ($past({s.handshake['valid'][0]})) "
+            f"assert ({s.handshake['ready'][0]} == 1);"
         ] if s.handshake.get('valid') and s.handshake.get('ready') else [],
     },
     {

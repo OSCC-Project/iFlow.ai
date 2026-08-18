@@ -42,7 +42,10 @@ class ExperimentRunner:
 
         combo["status"] = "running"
         try:
-            result = self.run_flow(exp["design"], combo["config"])
+            # _run_id 注入组合 ID: WS 进度按组合推送 (前端 /ws/exp_{exp_id}_{combo_id})
+            run_config = dict(combo["config"])
+            run_config["_run_id"] = f"exp_{exp_id}_{combo_id}"
+            result = self.run_flow(exp["design"], run_config)
             combo["status"] = "done"
             combo["result"] = result
             exp["completed"] += 1
@@ -87,15 +90,18 @@ class ExperimentRunner:
     def _extract_metrics(self, result: dict) -> dict:
         """从 flow run 结果中提取关键指标"""
         metrics = {}
+        # 工具列: Sheet 3 工具替换维度的口径标注 (sky130=ieda, nangate45/asap7=openroad)
+        metrics["tool"] = result.get("tool", "")
         for step in result.get("results", []):
             m = step.get("metrics", {})
-            if "wns" in m: metrics["wns_ns"] = m["wns"]
-            if "area" in m: metrics["area_mm2"] = m["area"]
-            if "power" in m: metrics["power_mw"] = m["power"]
+            if m.get("wns") is not None: metrics["wns_ns"] = m["wns"]
+            if m.get("area") is not None: metrics["area_mm2"] = m["area"]
+            if m.get("power") is not None: metrics["power_mw"] = m["power"]
             if step["step"] == "verible_lint":
                 metrics["lint_violations"] = step.get("violations", 0)
             if step["step"] == "idrc_drc":
-                metrics["drc_violations"] = step.get("metrics", {}).get("drc", "?")
+                # None = DRC 未运行 (如实展示, 不填 0)
+                metrics["drc_violations"] = step.get("metrics", {}).get("drc")
             metrics[f'{step["step"]}_duration'] = step.get("duration", 0)
         return metrics
 

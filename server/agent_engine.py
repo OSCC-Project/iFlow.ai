@@ -12,10 +12,14 @@ TRUNCATION = {
     "experience":  ["verible_lint", "verilator_lint", "icarus_sim"],
     "course":      ["verible_lint", "verilator_lint", "icarus_sim"],
     "competition": ["verible_lint", "verilator_lint", "yosys_synth", "ista_sta"],
-    "research":    ["verible_lint", "verilator_lint", "sby_check",
+    # P2-3: 补上 SKIP_RULES 引用的步骤名 (cdc_check/upf_check/dft_insert 等),
+    # 使跳过规则真正能裁剪步骤; 无对应后端的步骤由执行器如实 skipped
+    "research":    ["verible_lint", "verilator_lint", "sby_check", "cdc_check", "rdc_check",
+                    "upf_check", "dft_insert", "atpg", "low_power_check", "ir_drop",
                     "yosys_synth", "ieda_floorplan", "ieda_place", "ieda_cts",
                     "ieda_route", "ista_sta", "idrc_drc", "gds_export"],
-    "tapeout":     ["verible_lint", "verilator_lint", "sby_check",
+    "tapeout":     ["verible_lint", "verilator_lint", "sby_check", "cdc_check", "rdc_check",
+                    "upf_check", "dft_insert", "atpg", "low_power_check", "ir_drop",
                     "yosys_synth", "ieda_floorplan", "ieda_place", "ieda_cts",
                     "ieda_route", "ista_sta", "idrc_drc", "netgen_lvs", "gds_export"],
 }
@@ -70,26 +74,26 @@ class DesignProfile:
     @classmethod
     def from_code(cls, code: str) -> "DesignProfile":
         """从 Verilog 代码中提取设计特征"""
+        import re
         profile = cls()
+        # 去注释 (防止 //module GcdUnit 这类注释干扰顶层识别)
+        code_no_comment = re.sub(r'//[^\n]*', '', code)
+        code_no_comment = re.sub(r'/\*[\s\S]*?\*/', '', code_no_comment)
         # 数时钟域
         clocks = set()
-        for line in code.split("\n"):
+        for line in code_no_comment.split("\n"):
             if "posedge" in line or "negedge" in line:
-                import re
                 found = re.findall(r"(?:posedge|negedge)\s+(\w+)", line)
                 clocks.update(found)
         profile.clock_domains = max(len(clocks), 1)
         # 检查 UPF
         profile.has_upf = "upf" in code.lower() or "power" in code.lower()
         # 是否纯组合
-        profile.is_comb = "posedge" not in code and "negedge" not in code
+        profile.is_comb = "posedge" not in code_no_comment and "negedge" not in code_no_comment
         # 估算门数 (粗糙: 按行数估算)
-        profile.gates = max(len([l for l in code.split("\n") if l.strip() and not l.strip().startswith("//")]) * 10, 1)
-        # 提取 top module
-        m = re.search(r"module\s+(\w+)", code) if 're' in dir() else None
-        if not m:
-            import re
-            m = re.search(r"module\s+(\w+)", code)
+        profile.gates = max(len([l for l in code_no_comment.split("\n") if l.strip()]) * 10, 1)
+        # 提取 top module (去注释后第一个 module 声明)
+        m = re.search(r"\bmodule\s+(\w+)", code_no_comment)
         if m:
             profile.top_module = m.group(1)
         return profile
