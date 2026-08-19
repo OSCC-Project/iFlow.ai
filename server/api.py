@@ -385,6 +385,17 @@ def _execute_flow_steps(flow: dict, rtl_paths: list, tb_path: str, run_id: str,
                                     "VERILOG_SRC": src, "CLK_PERIOD": clk_period}
                     if liberty:
                         synth_params["LIBERTY_PATH"] = liberty
+                    if params.get("or_pdk") == "asap7":
+                        # asap7 库无异步复位 DFF 且 liberty 无 ff() 属性:
+                        # 异步复位转同步复位 + techmap 直接映射 DFF/组合门
+                        # (abc 与本机 asap7 SCL 数据不兼容, 已定位根因 → NO_ABC 绕过)
+                        synth_params["ASYNC2SYNC"] = True
+                        synth_params["DFF_MAP_FILE"] = "/home/xu/ic_agent_os/adapter/asap7_cells_dff.v"
+                        synth_params["NO_ABC"] = True
+                        synth_params["COMB_MAP_FILE"] = "/home/xu/ic_agent_os/adapter/asap7_cells_comb.v"
+                        synth_params["HILO_HI"] = "TIEHIx1_ASAP7_75t_R"
+                        synth_params["HILO_LO"] = "TIELOx1_ASAP7_75t_R"
+                        synth_params["TIE_RENAME"] = "TIELOx1_ASAP7_75t_R TIEHIx1_ASAP7_75t_R"
                     r = DigitalRunner({"synthesis": {}, "sta_primary": {"tool": "opensta"}}).execute(
                         design, synth_params)
                     netlist = r.get("netlist_path", "")
@@ -487,20 +498,28 @@ def _execute_flow_steps(flow: dict, rtl_paths: list, tb_path: str, run_id: str,
                 else:
                     from adapter.openroad_pdk import run_physical_flow
                     die, core = _util_to_areas(utilization)
-                    r = run_physical_flow(or_pdk, {
+                    or_params = {
                         "NETLIST_FILE": ieda_ctx["netlist"],
                         "DESIGN_TOP": default_top, "CLK_PORT": clk_port,
                         "CLK_PERIOD": clk_period,
                         "DIE_AREA": die, "CORE_AREA": core,
-                    }, "/home/xu/ic_agent_os/tmp/openroad_runs")
-                    # 成功 = 流程完成 + 产出布线 DEF (GDS 由后续 gds_export 步骤用 iEDA 转换)
+                    }
+                    partial = ""
+                    if or_pdk == "asap7":
+                        # asap7: detailed_route 与 tie cell 网存在工具链兼容问题
+                        # (DRT-0305: GROUND/POWER 类型网无法由 TritonRoute 布线,
+                        #  26Q1/26Q3 均无 API 可改网类型) → 流程到 global_route 为止, 如实标注
+                        or_params["STOP_AT"] = "global_route"
+                        partial = "部分完成 (到 global_route; detailed_route 受 tie 网限制)"
+                    r = run_physical_flow(or_pdk, or_params, "/home/xu/ic_agent_os/tmp/openroad_runs")
+                    # 成功 = 流程完成 + 产出 DEF (GDS 由后续 gds_export 步骤用 iEDA 转换)
                     ok = bool(r.get("success")) and bool(r.get("def_path"))
                     step_result.update({"status": "done" if ok else "failed", "success": ok,
                                         "metrics": _clean_metrics(r.get("metrics", {})),
                                         "gds_path": r.get("gds_path", ""),
                                         "def_path": r.get("def_path", ""),
-                                        "reason": f"OpenROAD {or_pdk} 全流程" if ok else
-                                                  f"OpenROAD 失败: {str(r.get('error', ''))[:200]}",
+                                        "reason": (f"OpenROAD {or_pdk} {partial}" if ok else
+                                                   f"OpenROAD 失败: {str(r.get('error', ''))[:200]}"),
                                         "run_dir": r.get("run_dir", ""),
                                         "tool": "openroad"})
             elif step == "ista_sta":
@@ -567,41 +586,46 @@ def _execute_flow_steps(flow: dict, rtl_paths: list, tb_path: str, run_id: str,
             elif step == "gds_export":
                 # P1-1: 只从本次 run 的输出目录取 GDS; 无布线后 DEF 则如实 skipped
                 if params.get("or_pdk"):
-                    # OpenROAD 路径: 布线 DEF → iEDA 通用 def_to_gds 转换 (LEF/DEF → GDS)
-                    or_def = ""
-                    for sr in results:
-                        if sr["step"] == "openroad_physical":
-                            or_def = sr.get("def_path", "")
-                    if not or_def or not os.path.exists(or_def):
-                        step_result.update({"status": "failed", "success": False,
-                                            "error": "OpenROAD 未产出布线 DEF, 无法转 GDS"})
+                    if params.get("or_pdk") == "asap7":
+                        # asap7 流程到 global_route 为止 (tie 网限制), 无详细布线 DEF → 如实不导 GDS
+                        step_result.update({"status": "skipped",
+                                            "reason": "asap7 无详细布线 DEF (流程到 global_route), 不导出 GDS"})
                     else:
-                        or_pdk = params.get("or_pdk")
-                        gds_out = os.path.join(os.path.dirname(or_def), "final_design.gds2")
-                        from adapter.ieda_runner import IEDARunner
-                        gds_runner = IEDARunner({
-                            "flows": ["gds"],
-                            "script_dir": f"/home/xu/ic_agent_os/adapter/gds_scripts/{or_pdk}",
-                            "config_dir": _IEDA_CONFIG_DIR,
-                            "working_dir": "/home/xu/ic_agent_os/tmp/ieda_runs",
-                            "force_subprocess": True,
-                        })
-                        r = gds_runner.execute(design, {
-                            "flows": ["gds"], "INPUT_DEF": or_def, "GDS_FILE": gds_out,
-                            "RUN_DIR": os.path.dirname(os.path.dirname(or_def)),
-                            "RESULT_DIR": os.path.dirname(or_def),
-                            "TCL_SCRIPT_DIR": f"/home/xu/ic_agent_os/adapter/gds_scripts/{or_pdk}",
-                        })
-                        ok = bool(r.get("success", r.get("returncode", 1) == 0)) and os.path.exists(gds_out)
-                        if ok:
-                            step_result.update({"status": "done", "success": True,
-                                                "gds_path": gds_out,
-                                                "reason": "iEDA def_to_gds 转换 (OpenROAD DEF)",
-                                                "tool": "ieda"})
-                        else:
-                            err = (r.get("stderr") or r.get("stdout") or "")[-200:]
+                        # OpenROAD 路径: 布线 DEF → iEDA 通用 def_to_gds 转换 (LEF/DEF → GDS)
+                        or_def = ""
+                        for sr in results:
+                            if sr["step"] == "openroad_physical":
+                                or_def = sr.get("def_path", "")
+                        if not or_def or not os.path.exists(or_def):
                             step_result.update({"status": "failed", "success": False,
-                                                "error": f"DEF→GDS 转换失败: {err}"})
+                                                "error": "OpenROAD 未产出布线 DEF, 无法转 GDS"})
+                        else:
+                            or_pdk = params.get("or_pdk")
+                            gds_out = os.path.join(os.path.dirname(or_def), "final_design.gds2")
+                            from adapter.ieda_runner import IEDARunner
+                            gds_runner = IEDARunner({
+                                "flows": ["gds"],
+                                "script_dir": f"/home/xu/ic_agent_os/adapter/gds_scripts/{or_pdk}",
+                                "config_dir": _IEDA_CONFIG_DIR,
+                                "working_dir": "/home/xu/ic_agent_os/tmp/ieda_runs",
+                                "force_subprocess": True,
+                            })
+                            r = gds_runner.execute(design, {
+                                "flows": ["gds"], "INPUT_DEF": or_def, "GDS_FILE": gds_out,
+                                "RUN_DIR": os.path.dirname(os.path.dirname(or_def)),
+                                "RESULT_DIR": os.path.dirname(or_def),
+                                "TCL_SCRIPT_DIR": f"/home/xu/ic_agent_os/adapter/gds_scripts/{or_pdk}",
+                            })
+                            ok = bool(r.get("success", r.get("returncode", 1) == 0)) and os.path.exists(gds_out)
+                            if ok:
+                                step_result.update({"status": "done", "success": True,
+                                                    "gds_path": gds_out,
+                                                    "reason": "iEDA def_to_gds 转换 (OpenROAD DEF)",
+                                                    "tool": "ieda"})
+                            else:
+                                err = (r.get("stderr") or r.get("stdout") or "")[-200:]
+                                step_result.update({"status": "failed", "success": False,
+                                                    "error": f"DEF→GDS 转换失败: {err}"})
                 elif not ieda_ctx["routed_def"] or not os.path.exists(ieda_ctx["routed_def"]):
                     step_result.update({"status": "skipped",
                                         "reason": "依赖未满足: 无布线后 DEF 可供导出"})
@@ -1520,13 +1544,16 @@ def api_flow_run_internal(design: str, config: dict, push_ws=None) -> dict:
     except (ValueError, TypeError):
         freq = 100.0
 
-    # 加载 RTL
+    # 加载 RTL (优先用户上传的设计)
     rtl_file = ""
-    for cand in (f"/home/xu/iFlow/rtl/{design}/{design}.v",
-                 f"/home/xu/iFlow/rtl/{design}.v"):
-        if os.path.exists(cand):
-            rtl_file = cand
-            break
+    if config.get("rtl_path") and os.path.exists(config["rtl_path"]):
+        rtl_file = config["rtl_path"]
+    else:
+        for cand in (f"/home/xu/iFlow/rtl/{design}/{design}.v",
+                     f"/home/xu/iFlow/rtl/{design}.v"):
+            if os.path.exists(cand):
+                rtl_file = cand
+                break
     if not rtl_file:
         return {"results": [{"step": "load_rtl", "status": "failed",
                              "error": f"RTL 不存在: {design}", "duration": 0}],
@@ -1549,10 +1576,17 @@ def api_flow_run_internal(design: str, config: dict, push_ws=None) -> dict:
     elif or_physical:
         steps = [s for s in steps if s != "ista_sta"] + [
             "openroad_physical", "idrc_drc", "gds_export"]
-    liberty = {"sky130": _IEDA_LIBERTY,
+    # 用户上传的自定义工艺 (liberty_uploads): PPA-only 路径 (综合+OpenSTA, 无物理)
+    custom_lib = ""
+    if config.get("liberty_path") and os.path.exists(config["liberty_path"]):
+        custom_lib = config["liberty_path"]
+        tool = "opensta"
+    liberty = custom_lib or {"sky130": _IEDA_LIBERTY,
                "nangate45": _NANGATE_LIBERTY,
                "asap7": "/home/xu/OpenROAD-flow-scripts/flow/platforms/asap7/lib/NLDM/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib.gz"}.get(pdk, "")
-    # yosys 不能读 gzip liberty → 解压缓存到工作区
+    # yosys 需要明文 liberty 且 abc 只收一个库: asap7 用 AO 库 (组合逻辑),
+    # DFF 由 asap7_cells_dff.v techmap 映射 (SEQ 库的 DFF 无 ff() 属性,
+    # dfflibmap 无法使用; OpenROAD 侧会读全部 4 个库, 不受影响)
     if liberty.endswith(".gz"):
         import gzip, shutil
         plain = os.path.join("/tmp/iflow_workspace/pdk_libs", os.path.basename(liberty)[:-3])

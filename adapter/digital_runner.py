@@ -155,19 +155,38 @@ class DigitalRunner(Backend):
             ys.run("opt")
             ys.run("memory")
             ys.run("opt")
+            if params.get("ASYNC2SYNC"):
+                # 工艺库无异步复位 DFF 时 (如 asap7) → 转同步复位 + 复位 mux
+                ys.run("async2sync")
             ys.run("techmap")
             ys.run("opt")
 
-            if liberty:
+            if params.get("DFF_MAP_FILE"):
+                # 工艺库无 ff() 属性 (如 asap7): techmap 直接映射内部 DFF → 库单元
+                ys.run(f"techmap -map {params['DFF_MAP_FILE']}")
+            elif liberty:
                 ys.run(f"dfflibmap -liberty {liberty}")
+            if params.get("NO_ABC"):
+                # 绕过 abc: 组合门直接 techmap 到库单元
+                # (asap7 liberty 的 SCL 会触发本机 abc 断言崩溃, 质量低于 abc 但功能正确)
+                ys.run(f"techmap -map {params['COMB_MAP_FILE']}")
+            elif liberty:
                 ys.run(f"abc -liberty {liberty}")
             else:
                 ys.log("# abc skipped: no liberty file")
+            if params.get("HILO_HI"):
+                # 常量 0/1 映射到 tie cell — 否则 OpenROAD 把常量当 POWER 网络, TritonRoute 拒绝布线
+                ys.run(f"hilomap -hicell {params['HILO_HI']} {params.get('HILO_HI_PORT', 'Y')} "
+                       f"-locell {params['HILO_LO']} {params.get('HILO_LO_PORT', 'Y')}")
+                # tie 实例重命名为可预测名字 (供 OpenROAD global_connect 按 inst_pattern 连接)
+                for cell in (params.get("TIE_RENAME") or "").split():
+                    ys.run(f"rename -enumerate -pattern {{{cell}_%d}} t:{cell}")
 
             ys.run("opt")
             ys.run("clean")
-            if liberty:
+            if liberty and not params.get("NO_ABC"):
                 # 面积指标 (Chip area for module ...) — 收敛历史图/PPA 数据源
+                # NO_ABC 路径单元跨多个库, stat 单库无意义 → 跳过 (面积由后端物理流程报)
                 ys.run(f"stat -liberty {liberty}")
             # -noattr: 网表供 iEDA/OpenSTA 消费, (* src = ... *) 属性会让 iEDA 解析器崩溃
             ys.run(f"write_verilog -noattr {netlist_path}")
@@ -218,17 +237,36 @@ class DigitalRunner(Backend):
                 f"read_verilog {verilog_src}",
                 f"hierarchy -top {top_module}",
                 "proc; opt; fsm; opt; memory; opt",
-                "techmap; opt",
             ]
-            if liberty:
+            if params.get("ASYNC2SYNC"):
+                # 工艺库无异步复位 DFF 时 (如 asap7) → 转同步复位 + 复位 mux
+                ys_commands.append("async2sync")
+            ys_commands.append("techmap; opt")
+            if params.get("DFF_MAP_FILE"):
+                # 工艺库无 ff() 属性 (如 asap7): techmap 直接映射内部 DFF → 库单元
+                ys_commands.append(f"techmap -map {params['DFF_MAP_FILE']}")
+            elif liberty:
                 ys_commands.append(f"dfflibmap -liberty {liberty}")
+            if params.get("NO_ABC"):
+                # 绕过 abc: 组合门直接 techmap 到库单元
+                # (asap7 liberty 的 SCL 会触发本机 abc 断言崩溃, 质量低于 abc 但功能正确)
+                ys_commands.append(f"techmap -map {params['COMB_MAP_FILE']}")
+            elif liberty:
                 ys_commands.append(f"abc -liberty {liberty}")
             else:
                 ys_commands.append("# abc skipped: no liberty file")
+            if params.get("HILO_HI"):
+                # 常量 0/1 映射到 tie cell — 否则 OpenROAD 把常量当 POWER 网络, TritonRoute 拒绝布线
+                ys_commands.append(f"hilomap -hicell {params['HILO_HI']} {params.get('HILO_HI_PORT', 'Y')} "
+                                   f"-locell {params['HILO_LO']} {params.get('HILO_LO_PORT', 'Y')}")
+                # tie 实例重命名为可预测名字 (供 OpenROAD global_connect 按 inst_pattern 连接)
+                for cell in (params.get("TIE_RENAME") or "").split():
+                    ys_commands.append(f"rename -enumerate -pattern {{{cell}_%d}} t:{cell}")
 
             ys_commands.append("opt; clean")
-            if liberty:
+            if liberty and not params.get("NO_ABC"):
                 # 面积指标 (Chip area for module ...) — 收敛历史图/PPA 数据源
+                # NO_ABC 路径单元跨多个库, stat 单库无意义 → 跳过 (面积由后端物理流程报)
                 ys_commands.append(f"stat -liberty {liberty}")
             ys_commands.append(f"write_verilog -noattr {netlist_path}")
             with open(ys_script_path, "w") as f:

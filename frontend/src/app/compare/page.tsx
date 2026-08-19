@@ -9,10 +9,10 @@ const API = 'http://localhost:8000'
 
 interface VarConfig { id: string; type: string; values: string }
 
-const VAR_TYPES = ['工艺 (PDK)', '利用率', '目标频率 (MHz)', '设计版本', '工具参数']
+const VAR_TYPES = ['工艺 (PDK)', '利用率', '目标频率 (MHz)', '设计', '设计版本', '工具参数']
 // 变量类型 → config key 映射 (与后端 api_flow_run_internal 对齐)
 const VAR_KEYS: Record<string, string> = {
-  '工艺 (PDK)': 'PDK', '利用率': 'utilization', '目标频率 (MHz)': 'frequency',
+  '工艺 (PDK)': 'PDK', '利用率': 'utilization', '目标频率 (MHz)': 'frequency', '设计': 'design',
 }
 
 type Progress = Record<string, { step: string; status: string; log: string }>
@@ -30,7 +30,29 @@ export default function Compare() {
   const [maps, setMaps] = useState<any>(null)
   const [sortCol, setSortCol] = useState('')
   const [sortDir, setSortDir] = useState<1|-1>(1)
+  // 用户自主添加: 设计 RTL 上传 + 工艺 liberty 上传 (PPA-only)
+  const [designUploads, setDesignUploads] = useState<Record<string, string>>({})
+  const [libUploads, setLibUploads] = useState<Record<string, string>>({})
   const wsRefs = useRef<WebSocket[]>([])
+
+  const onUploadDesigns = async (files: FileList | null) => {
+    if (!files) return
+    const next = { ...designUploads }
+    for (const f of Array.from(files)) {
+      if (!f.name.endsWith('.v')) continue
+      next[f.name.replace(/\.v$/, '')] = await f.text()
+    }
+    setDesignUploads(next)
+  }
+  const onUploadLibs = async (files: FileList | null) => {
+    if (!files) return
+    const next = { ...libUploads }
+    for (const f of Array.from(files)) {
+      if (!f.name.endsWith('.lib')) continue
+      next[f.name.replace(/\.lib$/, '')] = await f.text()
+    }
+    setLibUploads(next)
+  }
 
   useEffect(() => () => { wsRefs.current.forEach(w => w.close()) }, [])
 
@@ -50,7 +72,8 @@ export default function Compare() {
       })
       const r1 = await fetch(`${API}/api/experiment/create`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ design, variables: vars })
+        body: JSON.stringify({ design, variables: vars,
+          design_uploads: designUploads, liberty_uploads: libUploads })
       })
       const exp = await r1.json()
 
@@ -152,8 +175,28 @@ export default function Compare() {
             <label className="text-xs text-gray-500 block mb-1">设计</label>
             <select value={design} onChange={e => setDesign(e.target.value)}
               className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm w-full">
-              {['gcd', 'aes_cipher_top', 'uart'].map(d => <option key={d} value={d}>{d}</option>)}
+              {['gcd', 'aes_cipher_top', 'uart', ...Object.keys(designUploads)].map(d => <option key={d} value={d}>{d}</option>)}
             </select>
+          </div>
+
+          {/* 用户自主添加: 上传设计 RTL / 上传工艺 liberty (PPA-only) */}
+          <div className="space-y-2 bg-gray-800/30 rounded p-2">
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">⬆ 上传设计 (.v, 可多选) — 加入上方下拉框</label>
+              <input type="file" multiple accept=".v" onChange={e => onUploadDesigns(e.target.files)}
+                className="text-[11px] text-gray-400 file:bg-gray-700 file:border-0 file:rounded file:px-2 file:py-1 file:text-gray-300 file:mr-2"/>
+              {Object.keys(designUploads).length > 0 && (
+                <div className="text-[10px] text-green-400 mt-1">已添加: {Object.keys(designUploads).join(', ')}</div>
+              )}
+            </div>
+            <div>
+              <label className="text-xs text-gray-500 block mb-1">⬆ 上传工艺 liberty (.lib, 可多选) — 在「工艺 (PDK)」变量里填同名做 PPA 对比</label>
+              <input type="file" multiple accept=".lib" onChange={e => onUploadLibs(e.target.files)}
+                className="text-[11px] text-gray-400 file:bg-gray-700 file:border-0 file:rounded file:px-2 file:py-1 file:text-gray-300 file:mr-2"/>
+              {Object.keys(libUploads).length > 0 && (
+                <div className="text-[10px] text-blue-400 mt-1">已添加: {Object.keys(libUploads).join(', ')} (综合+STA 对比, 无物理流程)</div>
+              )}
+            </div>
           </div>
 
           {variables.map(v => (

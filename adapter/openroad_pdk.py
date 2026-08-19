@@ -21,6 +21,9 @@ OR_PDK = {
         "cts_buffer": "CLKBUF_X3",
         "fillers": "FILLCELL_X1 FILLCELL_X2 FILLCELL_X4 FILLCELL_X8 FILLCELL_X16 FILLCELL_X32",
         "rc_signal": "metal2", "rc_clock": "metal5",
+        "rc_mode": "wire_rc",   # tech LEF 有 RC 数据 → set_wire_rc
+        "route_layers": "set_routing_layers -signal metal2-metal8\nset_routing_layers -clock metal4-metal8",
+        "tie_connections": "",
         "hor_layer": "metal5", "ver_layer": "metal6",
         # GDS 导出 (KLayout DEF→GDS): 单元 GDS + 层映射
         "gds_files": f"{ORFS}/nangate45/gds/NangateOpenCellLibrary.gds",
@@ -30,10 +33,11 @@ OR_PDK = {
         "tech_lef": f"{ORFS}/asap7/lef/asap7_tech_1x_201209.lef",
         "cell_lef": f"{ORFS}/asap7/lef/asap7sc7p5t_28_R_1x_220121a.lef",
         "liberty": [
-            f"{ORFS}/asap7/lib/NLDM/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib.gz",
-            f"{ORFS}/asap7/lib/NLDM/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib.gz",
+            f"{ORFS}/asap7/lib/NLDM/asap7sc7p5t_SIMPLE_RVT_TT_nldm_211120.lib.gz",
             f"{ORFS}/asap7/lib/NLDM/asap7sc7p5t_INVBUF_RVT_TT_nldm_220122.lib.gz",
             f"{ORFS}/asap7/lib/NLDM/asap7sc7p5t_SEQ_RVT_TT_nldm_220123.lib",
+            f"{ORFS}/asap7/lib/NLDM/asap7sc7p5t_AO_RVT_TT_nldm_211120.lib.gz",
+            f"{ORFS}/asap7/lib/NLDM/asap7sc7p5t_OA_RVT_TT_nldm_211120.lib.gz",
         ],
         "site": "asap7sc7p5t",
         "tracks": f"{ORFS}/asap7/openRoad/make_tracks.tcl",
@@ -42,6 +46,13 @@ OR_PDK = {
         "cts_buffer": "BUFx2_ASAP7_75t_R",
         "fillers": "FILLERxp5_ASAP7_75t_R",
         "rc_signal": "M2", "rc_clock": "M5",
+        "rc_mode": "setrc",   # asap7 tech LEF 无 RC 数据 → source ORFS setRC.tcl (显式层 RC 值)
+        "setrc_file": f"{ORFS}/asap7/setRC.tcl",
+        "route_layers": "set_routing_layers -signal M2-M7\nset_routing_layers -clock M4-M7",
+        # tie cell 输出接到 VSS/VDD 网格 (TritonRoute 拒绝 GROUND/POWER 类型信号网;
+        # inst_pattern 按正则匹配 — OpenLane 同款锚定写法)
+        "tie_connections": ("add_global_connection -net {VSS} -inst_pattern {^.*TIELOx1_ASAP7_75t_R.*$} -pin_pattern {^Y$}\n"
+                            "add_global_connection -net {VDD} -inst_pattern {^.*TIEHIx1_ASAP7_75t_R.*$} -pin_pattern {^Y$}"),
         "hor_layer": "M4", "ver_layer": "M5",
         # GDS 导出 (KLayout DEF→GDS)
         "gds_files": " ".join(f"{ORFS}/asap7/gds/{f}" for f in sorted(os.listdir(f"{ORFS}/asap7/gds")) if f.endswith(".gds")),
@@ -62,11 +73,13 @@ initialize_floorplan -die_area "{die}" -core_area "{core}" -site {site}
 source {tracks}
 place_pins -hor_layers {hor_layer} -ver_layers {ver_layer}
 {tap_cmd}
+{tie_connections}
 source {pdn}
 pdngen
-set_wire_rc -signal -layer {rc_signal}
-set_wire_rc -clock -layer {rc_clock}
+{route_layers}
+{rc_setup}
 global_placement -density {density}
+{rc_post_place}
 repair_timing
 detailed_placement
 repair_timing
@@ -74,9 +87,7 @@ clock_tree_synthesis -buf_list {cts_buffer}
 detailed_placement
 repair_timing
 global_route
-detailed_route
-repair_timing
-filler_placement {{{fillers}}}
+{post_groute}
 report_checks -format full_clock > {rd}/timing.rpt
 report_design_area > {rd}/area.rpt
 write_def {rd}/route.def
@@ -105,7 +116,17 @@ def run_physical_flow(pdk: str, params: dict, working_dir: str) -> dict:
         clk_period=params.get("CLK_PERIOD", 10.0), clk=params.get("CLK_PORT", "clk"),
         die=params.get("DIE_AREA", "0 0 150 150"), core=params.get("CORE_AREA", "10 10 140 140"),
         site=prof["site"], tracks=prof["tracks"], tap_cmd=prof["tap"], pdn=prof["pdn"],
+        tie_connections=prof.get("tie_connections", ""),
         rc_signal=prof["rc_signal"], rc_clock=prof["rc_clock"],
+        route_layers=prof["route_layers"],
+        rc_setup=("set_wire_rc -signal -layer {0}\nset_wire_rc -clock -layer {1}".format(
+            prof["rc_signal"], prof["rc_clock"]) if prof["rc_mode"] == "wire_rc"
+            else ("source {0}".format(prof["setrc_file"]) if prof["rc_mode"] == "setrc" else "")),
+        rc_post_place=("estimate_parasitics -placement"
+                       if prof["rc_mode"] == "estimate" else ""),
+        post_groute=(f"detailed_route\nrepair_timing\nfiller_placement {{{prof['fillers']}}}"
+                     if not params.get("STOP_AT") else
+                     "# STOP_AT: 跳过详细布线 (工具链兼容限制, 如实标注)"),
         hor_layer=prof["hor_layer"], ver_layer=prof["ver_layer"],
         density=params.get("PLACE_DENSITY", 0.6), cts_buffer=prof["cts_buffer"],
         fillers=prof["fillers"], rd=rd,
