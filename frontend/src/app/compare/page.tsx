@@ -60,6 +60,18 @@ export default function Compare() {
   const removeVar = (id: string) => setVariables(variables.filter(v => v.id !== id))
   const comboCount = variables.reduce((n, v) => n * (v.values.split(',').filter(Boolean).length || 1), 1)
 
+  // 设计变量的候选值: 固定设计 + 用户上传的设计 (上传后立即可选)
+  const allDesigns = ['gcd', 'aes_cipher_top', 'uart', ...Object.keys(designUploads)]
+  // 点击候选 chip → 在"设计"变量值里切换
+  const toggleDesignValue = (varId: string, name: string) => {
+    setVariables(variables.map(v => {
+      if (v.id !== varId) return v
+      const cur = v.values.split(',').map(s => s.trim()).filter(Boolean)
+      const next = cur.includes(name) ? cur.filter(x => x !== name) : [...cur, name]
+      return { ...v, values: next.join(', ') }
+    }))
+  }
+
   const runExperiment = async () => {
     setRunning(true); setResults(null); setProgress({})
     try {
@@ -210,11 +222,29 @@ export default function Compare() {
                 </select>
               </div>
               <div className="flex-1">
-                <label className="text-xs text-gray-500 block mb-1">值 (逗号分隔)</label>
-                <input value={v.values} onChange={e => {
+                <label className="text-xs text-gray-500 block mb-1">值 (逗号分隔){v.type==='设计' && ' — 点选候选或输入'}</label>
+                <input value={v.values} list={`design-cands-${v.id}`} onChange={e => {
                   setVariables(variables.map(x => x.id===v.id ? {...x, values: e.target.value} : x))
                 }} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs w-full"
-                  placeholder="sky130, nangate45" />
+                  placeholder={v.type==='设计' ? "gcd, uart" : "sky130, nangate45"} />
+                {v.type==='设计' && (
+                  <>
+                    <datalist id={`design-cands-${v.id}`}>
+                      {allDesigns.map(d => <option key={d} value={d} />)}
+                    </datalist>
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {allDesigns.map(d => {
+                        const active = v.values.split(',').map(s=>s.trim()).includes(d)
+                        return (
+                          <button key={d} onClick={() => toggleDesignValue(v.id, d)}
+                            className={`px-1.5 py-0.5 rounded text-[10px] border ${active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}>
+                            {d}{active ? ' ✓' : ''}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
               </div>
               <button onClick={() => removeVar(v.id)} className="text-red-400 text-xs pb-1">✕</button>
             </div>
