@@ -361,7 +361,8 @@ Rules:
         except Exception:
             return ""
 
-    def _cross_verify_python(self, verilog: str, py_model: str, sample_count: int = 20) -> tuple:
+    def _cross_verify_python(self, verilog: str, py_model: str, sample_count: int = 20,
+                             clk_period_ns: float = 10.0) -> tuple:
         """ChipMATE 交叉验证 — 严格移植 chipmate/cross_verify.py:
         端口解析 → 随机激励 → 复位预处理 → 逐输出信号对比 → mismatch 记录"""
         import random
@@ -407,7 +408,8 @@ Rules:
         lines.append('  initial begin $dumpfile("sim.vcd"); $dumpvars(0, stim_tb); end')
         if has_clk:
             lines.append("  initial clk = 0;")
-            lines.append("  always #5 clk = ~clk;")
+            # 时钟周期由前端仿真控制面板透传 (默认 10ns → 半周期 #5)
+            lines.append(f"  always #{clk_period_ns / 2:g} clk = ~clk;")
         lines.append("  initial begin")
         for name, _ in inputs:
             if name.lower() == 'clk':
@@ -579,8 +581,8 @@ print("PY_RESULTS " + json.dumps(results))
             "py_results": py_results,
             "signals": sig_out,
             "vcd_path": vcd_path,
-            # 实际采样周期 (TB 中 always #5 clk=~clk → 周期 10ns)
-            "time_step_ns": 10,
+            # 实际采样周期 (TB 中 always #{p/2} clk=~clk → 周期 = 前端透传的 clk_period_ns)
+            "time_step_ns": clk_period_ns,
         }
         return match_rate, out, detail
 

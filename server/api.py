@@ -338,7 +338,9 @@ def _execute_flow_steps(flow: dict, rtl_paths: list, tb_path: str, run_id: str,
                                 py = params.get("py_model") or cr._generate_python_model("test", rtl_code)
                                 if py:
                                     sc = int(params.get("sample_count", 20))
-                                    mr, sim_out, detail = cr._cross_verify_python(rtl_code, py, sc)
+                                    mr, sim_out, detail = cr._cross_verify_python(
+                                        rtl_code, py, sc,
+                                        clk_period_ns=float(params.get("clk_period_ns", 10)))
                                     err_suffix = ""
                                     for k in ("sv_error", "py_error", "meta_error"):
                                         if detail.get(k):

@@ -17,6 +17,93 @@ const VAR_KEYS: Record<string, string> = {
 
 type Progress = Record<string, { step: string; status: string; log: string }>
 
+// 下拉多选控件 (方案 5.2.2 复选框列表风格): 收起时显示已选值, 展开为复选清单
+function MultiSelect({ options, selected, onToggle, onClear, placeholder }: {
+  options: string[]; selected: string[]; onToggle: (v: string) => void;
+  onClear: () => void; placeholder: string
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="relative">
+      <button type="button" onClick={() => setOpen(!open)}
+        className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-left flex items-center justify-between gap-1 hover:border-gray-600">
+        <span className={`truncate ${selected.length ? 'text-gray-200' : 'text-gray-600'}`}>
+          {selected.length ? selected.join(', ') : placeholder}
+        </span>
+        <span className="text-gray-500 shrink-0">{open ? '▴' : '▾'}</span>
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="absolute z-20 mt-1 w-full bg-gray-800 border border-gray-700 rounded shadow-lg py-1">
+            {options.map(o => (
+              <label key={o} className="flex items-center gap-2 px-2 py-1 hover:bg-gray-700/50 cursor-pointer">
+                <input type="checkbox" checked={selected.includes(o)}
+                  onChange={() => onToggle(o)} className="accent-blue-500" />
+                <span className="text-xs text-gray-300 font-mono">{o}</span>
+              </label>
+            ))}
+            <div className="border-t border-gray-700 mt-1 pt-1 px-2 pb-1 flex items-center justify-between">
+              <span className="text-[10px] text-gray-500">{selected.length} 项已选</span>
+              {selected.length > 0 && (
+                <button type="button" onClick={() => { onClear(); setOpen(false) }}
+                  className="text-[10px] text-gray-500 hover:text-red-400">清空</button>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+// 组合的唯一键 (行勾选/详情展开按它定位, 与排序无关)
+const comboKey = (row: any) => JSON.stringify(row.combo || {})
+
+// 区域 E: 同工艺纵向结论 — 把只在一个变量 (非设计/PDK) 上不同的行归组
+function buildVerticalGroups(rows: any[]) {
+  const groups: { axis: string; rows: any[] }[] = []
+  const used = new Set<number>()
+  for (let i = 0; i < rows.length; i++) {
+    if (used.has(i)) continue
+    const a = rows[i], ka = a.combo || {}
+    let axis = ''
+    const group = [a]
+    used.add(i)
+    for (let j = i + 1; j < rows.length; j++) {
+      if (used.has(j)) continue
+      const b = rows[j], kb = b.combo || {}
+      const keys = new Set([...Object.keys(ka), ...Object.keys(kb)])
+      const diff = [...keys].filter(k => String(ka[k] ?? '') !== String(kb[k] ?? ''))
+      if (diff.length !== 1) continue
+      const k = diff[0]
+      if (k === 'design' || k === 'PDK') continue
+      if (!axis) axis = k
+      if (k !== axis) continue
+      // 候选与组内所有成员只允许在 axis 上不同
+      const ok = group.every(m => {
+        const mk = m.combo || {}
+        const mkeys = new Set([...Object.keys(kb), ...Object.keys(mk)])
+        const d = [...mkeys].filter(kk => String(kb[kk] ?? '') !== String(mk[kk] ?? ''))
+        return d.every(kk => kk === axis)
+      })
+      if (ok) { group.push(b); used.add(j) }
+    }
+    if (group.length >= 2) {
+      // 组内按 axis 值排序 (数值感知, 如 30% < 35% < 40%)
+      const numAware = (x: string, y: string) => {
+        const nx = parseFloat(x), ny = parseFloat(y)
+        if (!isNaN(nx) && !isNaN(ny)) return nx - ny
+        return String(x).localeCompare(String(y))
+      }
+      const sorted = [...group].sort((x, y) =>
+        numAware(String(x.combo?.[axis] ?? ''), String(y.combo?.[axis] ?? '')))
+      groups.push({ axis, rows: sorted })
+    }
+  }
+  return groups
+}
+
 export default function Compare() {
   const [design, setDesign] = useState('gcd')
   const [variables, setVariables] = useState<VarConfig[]>([
@@ -30,6 +117,9 @@ export default function Compare() {
   const [maps, setMaps] = useState<any>(null)
   const [sortCol, setSortCol] = useState('')
   const [sortDir, setSortDir] = useState<1|-1>(1)
+  // 行勾选 (comboKey 集合) + 区域 D 详情展开的当前组合
+  const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set())
+  const [detailKey, setDetailKey] = useState<string | null>(null)
   // 用户自主添加: 设计 RTL 上传 + 工艺 liberty 上传 (PPA-only)
   const [designUploads, setDesignUploads] = useState<Record<string, string>>({})
   const [libUploads, setLibUploads] = useState<Record<string, string>>({})
@@ -74,6 +164,7 @@ export default function Compare() {
 
   const runExperiment = async () => {
     setRunning(true); setResults(null); setProgress({})
+    setSelectedRows(new Set()); setDetailKey(null)
     try {
       // 变量名翻译为后端 config key (如 "工艺 (PDK)" → "PDK")
       const vars: any = {}
@@ -128,6 +219,11 @@ export default function Compare() {
     lint: r.lint_violations,
   }))
 
+  // 区域 D: 组合 config → 完整步骤明细 (与 rows 同源, 后端同一对象序列化)
+  const detailMap = new Map<string, any>(
+    (results?.experiment?.results || []).map((r: any) => [JSON.stringify(r.config || {}), r]))
+  const detailEntry = detailKey ? detailMap.get(detailKey) : null
+
   // 区域 A: 列排序 (点击表头切换)
   const sortRows = (col: string) => {
     if (sortCol === col) setSortDir(sortDir === 1 ? -1 : 1)
@@ -158,23 +254,72 @@ export default function Compare() {
     return ''
   }
 
+  // 导出: 有勾选时只导出勾选行
+  const exportRows = () => selectedRows.size ? rows.filter(r => selectedRows.has(comboKey(r))) : rows
+
+  const cellText = (v: any) => v === null || v === undefined ? '' :
+    typeof v === 'object' ? JSON.stringify(v).replace(/"/g, "'") : String(v)
+
   const exportCSV = () => {
-    const cols = results?.summary?.columns || []
+    const cols: string[] = results?.summary?.columns || []
     const lines = [cols.join(',')]
-    rows.forEach((r: any) => lines.push(cols.map((c: string) => {
-      const v = r[c]
-      return v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v).replace(/"/g, "'") : String(v)
-    }).join(',')))
+    exportRows().forEach((r: any) => lines.push(cols.map((c: string) => cellText(r[c])).join(',')))
     const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob); a.download = `compare_${design}_${Date.now()}.csv`; a.click()
   }
+
+  // Excel 导出: SpreadsheetML (.xls, Excel/WPS 直接打开, 无额外依赖)
+  const exportXLS = () => {
+    const cols: string[] = results?.summary?.columns || []
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const cell = (v: any) => `<Cell><Data ss:Type="String">${esc(cellText(v))}</Data></Cell>`
+    const head = `<Row>${cols.map(c => cell(c)).join('')}</Row>`
+    const body = exportRows().map(r => `<Row>${cols.map(c => cell(r[c])).join('')}</Row>`).join('')
+    const xml = `<?xml version="1.0"?><?mso-application progid="Excel.Sheet"?>` +
+      `<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">` +
+      `<Worksheet ss:Name="compare"><Table>${head}${body}</Table></Worksheet></Workbook>`
+    const blob = new Blob(['﻿' + xml], { type: 'application/vnd.ms-excel' })
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob); a.download = `compare_${design}_${Date.now()}.xls`; a.click()
+  }
+
+  const toggleRow = (k: string) => setSelectedRows(prev => {
+    const n = new Set(prev)
+    if (n.has(k)) n.delete(k); else n.add(k)
+    return n
+  })
+  const allSelected = rows.length > 0 && selectedRows.size === rows.length
+  const toggleAll = () => setSelectedRows(allSelected ? new Set() : new Set(rows.map(comboKey)))
+
+  // 区域 E: 同工艺纵向结论 (同设计同工艺, 单变量变化趋势)
+  const verticalGroups = buildVerticalGroups(rows)
+  const metricCols = [
+    { key: 'wns_ns', label: 'WNS (ns)' }, { key: 'area_mm2', label: '面积 (mm²)' },
+    { key: 'drc_violations', label: 'DRC' }, { key: 'power_mw', label: '功耗 (mW)' },
+  ]
+  const groupMetricCols = (g: { axis: string; rows: any[] }) =>
+    metricCols.filter(mc => g.rows.some(r => typeof r[mc.key] === 'number'))
 
   const metricOptions = [
     { key: 'area', label: '面积 (μm²)', color: '#34d399' },
     { key: 'wns', label: 'WNS (ns)', color: '#60a5fa' },
     { key: 'drc', label: 'DRC 违规数', color: '#f87171' },
   ] as const
+
+  // 区域 D 步骤指标格式化
+  const metricUnits: Record<string, string> = { wns: 'ns', area: 'mm²', power: 'mW', drc: '处' }
+  const fmtStepMetrics = (s: any): string => {
+    const parts: string[] = []
+    for (const [k, v] of Object.entries(s.metrics || {})) {
+      if (v === null || v === undefined) continue
+      parts.push(`${k} ${v}${metricUnits[k] || ''}`)
+    }
+    if (typeof s.violations === 'number') parts.push(`lint违规 ${s.violations}`)
+    return parts.join(' · ') || '-'
+  }
+  const stepIcon = (s: any) => s.status === 'failed' ? '❌' : s.status === 'skipped' ? '⏭️' : '✅'
+  const basename = (p: string) => (p || '').split('/').pop()
 
   return (
     <div className="max-w-6xl mx-auto space-y-4">
@@ -183,18 +328,10 @@ export default function Compare() {
       {/* Config */}
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-3">
-          <div>
-            <label className="text-xs text-gray-500 block mb-1">设计</label>
-            <select value={design} onChange={e => setDesign(e.target.value)}
-              className="bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm w-full">
-              {['gcd', 'aes_cipher_top', 'uart', ...Object.keys(designUploads)].map(d => <option key={d} value={d}>{d}</option>)}
-            </select>
-          </div>
-
           {/* 用户自主添加: 上传设计 RTL / 上传工艺 liberty (PPA-only) */}
           <div className="space-y-2 bg-gray-800/30 rounded p-2">
             <div>
-              <label className="text-xs text-gray-500 block mb-1">⬆ 上传设计 (.v, 可多选) — 加入上方下拉框</label>
+              <label className="text-xs text-gray-500 block mb-1">⬆ 上传设计 (.v, 可多选) — 加入「设计」变量候选</label>
               <input type="file" multiple accept=".v" onChange={e => onUploadDesigns(e.target.files)}
                 className="text-[11px] text-gray-400 file:bg-gray-700 file:border-0 file:rounded file:px-2 file:py-1 file:text-gray-300 file:mr-2"/>
               {Object.keys(designUploads).length > 0 && (
@@ -222,27 +359,23 @@ export default function Compare() {
                 </select>
               </div>
               <div className="flex-1">
-                <label className="text-xs text-gray-500 block mb-1">值 (逗号分隔){v.type==='设计' && ' — 点选候选或输入'}</label>
-                <input value={v.values} list={`design-cands-${v.id}`} onChange={e => {
-                  setVariables(variables.map(x => x.id===v.id ? {...x, values: e.target.value} : x))
-                }} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs w-full"
-                  placeholder={v.type==='设计' ? "gcd, uart" : "sky130, nangate45"} />
-                {v.type==='设计' && (
+                {v.type === '设计' ? (
                   <>
-                    <datalist id={`design-cands-${v.id}`}>
-                      {allDesigns.map(d => <option key={d} value={d} />)}
-                    </datalist>
-                    <div className="flex flex-wrap gap-1 mt-1">
-                      {allDesigns.map(d => {
-                        const active = v.values.split(',').map(s=>s.trim()).includes(d)
-                        return (
-                          <button key={d} onClick={() => toggleDesignValue(v.id, d)}
-                            className={`px-1.5 py-0.5 rounded text-[10px] border ${active ? 'bg-blue-600 border-blue-500 text-white' : 'bg-gray-800 border-gray-700 text-gray-400 hover:bg-gray-700'}`}>
-                            {d}{active ? ' ✓' : ''}
-                          </button>
-                        )
-                      })}
-                    </div>
+                    <label className="text-xs text-gray-500 block mb-1">值</label>
+                    <MultiSelect
+                      options={allDesigns}
+                      selected={v.values.split(',').map(s => s.trim()).filter(Boolean)}
+                      onToggle={name => toggleDesignValue(v.id, name)}
+                      onClear={() => setVariables(variables.map(x => x.id === v.id ? { ...x, values: '' } : x))}
+                      placeholder="选择设计..." />
+                  </>
+                ) : (
+                  <>
+                    <label className="text-xs text-gray-500 block mb-1">值 (逗号分隔)</label>
+                    <input value={v.values} onChange={e => {
+                      setVariables(variables.map(x => x.id===v.id ? {...x, values: e.target.value} : x))
+                    }} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs w-full"
+                      placeholder="sky130, nangate45" />
                   </>
                 )}
               </div>
@@ -257,7 +390,7 @@ export default function Compare() {
         <div className="bg-gray-900 border border-gray-700 rounded p-4">
           <h4 className="text-sm font-medium mb-3 text-gray-300">实验摘要</h4>
           <div className="space-y-2 text-xs text-gray-400">
-            <div>设计: <span className="text-gray-200">{design}</span></div>
+            <div>默认设计: <span className="text-gray-200">{design}</span> <span className="text-gray-600">(加「设计」变量可多设计对比)</span></div>
             <div>变量数: {variables.length}</div>
             <div>组合总数: <span className="text-blue-400 text-lg font-bold">{comboCount}</span></div>
             <div>预计耗时: ~{comboCount * 10} 分钟</div>
@@ -303,17 +436,33 @@ export default function Compare() {
         </div>
       )}
 
-      {/* 区域 A: 总表 + 导出 */}
+      {/* 区域 A: 总表 (行勾选 + 点击行展开区域 D 详情) */}
       {results && !results.error && (
         <div className="bg-gray-900 border border-gray-700 rounded p-3">
-          <div className="flex items-center justify-between mb-2">
-            <h4 className="text-sm font-medium text-gray-300">对比结果 ({rows.length} 组)</h4>
-            <button onClick={exportCSV} className="text-blue-400 text-[11px] hover:underline">导出 CSV</button>
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <h4 className="text-sm font-medium text-gray-300">对比结果 ({rows.length} 组)
+              <span className="text-[10px] text-gray-600 ml-2">☑ 勾选行 · 点击行看步骤明细</span>
+            </h4>
+            <div className="flex items-center gap-3">
+              {selectedRows.size > 0 && (
+                <span className="text-[10px] text-gray-500">已选 {selectedRows.size} 行</span>
+              )}
+              <button onClick={exportCSV} className="text-blue-400 text-[11px] hover:underline">
+                导出 CSV{selectedRows.size > 0 ? ` (${selectedRows.size})` : ''}
+              </button>
+              <button onClick={exportXLS} className="text-blue-400 text-[11px] hover:underline">
+                导出 Excel{selectedRows.size > 0 ? ` (${selectedRows.size})` : ''}
+              </button>
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-gray-400 border-b border-gray-800">
+                  <th className="w-8 py-1.5 px-1">
+                    <input type="checkbox" checked={allSelected} onChange={toggleAll}
+                      className="accent-blue-500" />
+                  </th>
                   {results.summary?.columns?.map((c: string) => (
                     <th key={c} onClick={() => sortRows(c)}
                       className="text-left py-1.5 px-2 whitespace-nowrap cursor-pointer hover:text-white select-none">
@@ -323,18 +472,82 @@ export default function Compare() {
                 </tr>
               </thead>
               <tbody>
-                {sortedRows.map((row: any, i: number) => (
-                  <tr key={i} className="border-b border-gray-800/50 hover:bg-gray-800/30">
-                    {results.summary.columns.map((c: string) => (
-                      <td key={c} className={`py-1 px-2 whitespace-nowrap ${cellCls(c, row[c])}`}>
-                        {typeof row[c] === 'object' ? JSON.stringify(row[c]) : String(row[c] ?? '-')}
+                {sortedRows.map((row: any, i: number) => {
+                  const k = comboKey(row)
+                  return (
+                    <tr key={i} onClick={() => setDetailKey(detailKey === k ? null : k)}
+                      className={`border-b border-gray-800/50 cursor-pointer ${detailKey === k ? 'bg-blue-900/30' : 'hover:bg-gray-800/30'}`}>
+                      <td className="py-1 px-1" onClick={e => e.stopPropagation()}>
+                        <input type="checkbox" checked={selectedRows.has(k)}
+                          onChange={() => toggleRow(k)} className="accent-blue-500" />
                       </td>
-                    ))}
-                  </tr>
-                ))}
+                      {results.summary.columns.map((c: string) => (
+                        <td key={c} className={`py-1 px-2 whitespace-nowrap ${cellCls(c, row[c])}`}>
+                          {typeof row[c] === 'object' ? JSON.stringify(row[c]) : String(row[c] ?? '-')}
+                        </td>
+                      ))}
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
           </div>
+
+          {/* 区域 D: 单设计详情 — 点行展开该组合的完整步骤明细 */}
+          {detailKey && (
+            <div className="mt-3 border border-blue-800/60 rounded p-3 bg-blue-950/10">
+              <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                <h4 className="text-sm font-medium text-blue-300">🔍 组合详情
+                  <span className="text-gray-400 font-normal ml-2 text-[11px] font-mono">
+                    {detailEntry ? Object.entries(detailEntry.config || {}).map(([k, v]) => `${k}=${v}`).join('  ') : detailKey}
+                  </span>
+                </h4>
+                <button onClick={() => setDetailKey(null)} className="text-gray-500 text-[11px] hover:text-white">✕ 关闭</button>
+              </div>
+              {!detailEntry ? (
+                <div className="text-[11px] text-gray-500">该组合执行失败或无步骤数据</div>
+              ) : !detailEntry.result ? (
+                <div className="text-[11px] text-red-400">组合执行失败: {detailEntry.error || '未知错误'}</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="text-gray-500 border-b border-gray-800">
+                        <th className="text-left py-1.5 px-2">步骤</th>
+                        <th className="text-left py-1.5 px-2 w-12">状态</th>
+                        <th className="text-left py-1.5 px-2 w-20">耗时</th>
+                        <th className="text-left py-1.5 px-2">关键指标</th>
+                        <th className="text-left py-1.5 px-2">说明</th>
+                        <th className="text-left py-1.5 px-2">产物</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(detailEntry.result.results || []).map((s: any, si: number) => (
+                        <tr key={si} className="border-b border-gray-800/50">
+                          <td className="py-1 px-2 text-gray-300 font-mono whitespace-nowrap">{s.step}</td>
+                          <td className="py-1 px-2">{stepIcon(s)}
+                            {s.status === 'running' && <span className="text-blue-400 animate-pulse">●</span>}
+                          </td>
+                          <td className="py-1 px-2 text-gray-500">{(s.duration ?? 0).toFixed(1)}s</td>
+                          <td className="py-1 px-2 text-gray-300 font-mono">{fmtStepMetrics(s)}</td>
+                          <td className="py-1 px-2 text-gray-500" title={s.reason || s.error || ''}>
+                            {(s.reason || s.error || '').slice(0, 80)}
+                            {((s.reason || '') + (s.error || '')).length > 80 ? '…' : ''}
+                          </td>
+                          <td className="py-1 px-2 font-mono text-gray-500">
+                            {[s.def_path, s.gds_path].filter(Boolean).map((p: string) => (
+                              <div key={p} className="truncate max-w-[180px]" title={p}>{basename(p)}</div>
+                            ))}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="text-[10px] text-gray-600 mt-1 font-mono">run_id: {detailEntry.result.run_id || '-'} · tool: {detailEntry.result.tool || '-'}</div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -359,6 +572,76 @@ export default function Compare() {
                 )}
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* 区域 E: 同工艺纵向结论 — 同设计同工艺下单一变量 (利用率/频率) 变化趋势 */}
+      {verticalGroups.length > 0 && (
+        <div className="bg-gray-900 border border-gray-700 rounded p-3">
+          <h4 className="text-sm font-medium text-gray-300">📈 同工艺纵向结论</h4>
+          <p className="text-[10px] text-gray-600 mt-0.5 mb-2">
+            同一设计在同一工艺下, 仅一个变量取值不同时的趋势 (与上方横向总表互补)
+          </p>
+          <div className="space-y-3">
+            {verticalGroups.map((g, gi) => {
+              const gDesign = g.rows[0].combo?.design || results?.experiment?.design || '-'
+              const gPdk = g.rows[0].combo?.PDK || '-'
+              const fixedKeys: [string, any][] = Object.entries(g.rows[0].combo || {})
+                .filter(([k]) => k !== g.axis && k !== 'design' && k !== 'PDK')
+              const cols = groupMetricCols(g)
+              const first = g.rows[0], last = g.rows[g.rows.length - 1]
+              const fNum = (v: any) => typeof v === 'number' ? v.toFixed(3) : '-'
+              const deltas = cols.map(mc => {
+                const a = first[mc.key], b = last[mc.key]
+                if (typeof a !== 'number' || typeof b !== 'number') return null
+                const d = b - a
+                const sym = Math.abs(d) < 1e-9 ? '—' : `${d > 0 ? '+' : ''}${d.toFixed(3)}`
+                return `${mc.label}: ${fNum(a)}→${fNum(b)} (${sym})`
+              }).filter(Boolean)
+              return (
+                <div key={gi} className="border border-gray-800 rounded p-2">
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                    <span className="text-xs font-medium text-blue-300 font-mono">{gPdk}</span>
+                    <span className="text-xs text-gray-300 font-mono">{gDesign}</span>
+                    {fixedKeys.map(([k, v]) => (
+                      <span key={k} className="text-[10px] text-gray-500 bg-gray-800/60 rounded px-1.5 py-0.5">{k}={v}</span>
+                    ))}
+                    <span className="text-[10px] text-yellow-500 bg-yellow-900/20 rounded px-1.5 py-0.5">{g.axis} 为变量</span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-[11px]">
+                      <thead>
+                        <tr className="text-gray-500 border-b border-gray-800">
+                          <th className="text-left py-1 px-2">{g.axis}</th>
+                          {cols.map(mc => <th key={mc.key} className="text-left py-1 px-2">{mc.label}</th>)}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {g.rows.map((r, ri) => (
+                          <tr key={ri} className="border-b border-gray-800/50">
+                            <td className="py-1 px-2 text-gray-200 font-mono">{String(r.combo?.[g.axis] ?? '-')}</td>
+                            {cols.map(mc => {
+                              const v = r[mc.key]
+                              return (
+                                <td key={mc.key} className={`py-1 px-2 ${cellCls(mc.key, v)}`}>
+                                  {typeof v === 'number' ? v.toFixed(3) : '-'}
+                                </td>
+                              )
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  {deltas.length > 0 && (
+                    <div className="text-[10px] text-gray-400 mt-1">
+                      结论: {g.axis} {String(first.combo?.[g.axis])} → {String(last.combo?.[g.axis])}: {deltas.join(' · ')}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}

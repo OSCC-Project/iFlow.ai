@@ -29,6 +29,8 @@ export default function Stage2() {
   const [chat, setChat] = useState<ChatMsg[]>([])
   const [chatInput, setChatInput] = useState('')
   const [sampleCount, setSampleCount] = useState(20)
+  // 仿真控制: 时钟周期 (后端 TB always #{p/2} → VCD/波形时间轴同源)
+  const [clkPeriod, setClkPeriod] = useState(10)
   // 覆盖率 (方案 3.3): Verilator Line + Toggle, 激励与自动激励仿真同源
   const [coverage, setCoverage] = useState<any>(null)
   const [loadingCov, setLoadingCov] = useState(false)
@@ -125,7 +127,7 @@ export default function Stage2() {
           const body:any={flow_id:f.flow_id,rtl_code:code,params:{run_id:myRunId}}
           if(mode==='tb'){ body.tb_code=tb }
           else {
-            body.params={sample_count:sampleCount,run_id:myRunId,py_model:pyModel}
+            body.params={sample_count:sampleCount,clk_period_ns:clkPeriod,run_id:myRunId,py_model:pyModel}
           }
           const r2=await fetch(`${API}/api/flow/run`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const run=await r2.json()
           const icarusStep=(run.results||[]).find((r:any)=>r.step==='icarus_sim')||null
@@ -247,10 +249,18 @@ export default function Stage2() {
           {/* 两种仿真模式并列: 自动激励 (参考模型对照) 与 TB 仿真 (定向测试), 结果独立展示 */}
           <button onClick={()=>runSimWith('auto')} disabled={loadingSim||!code} title="平台随机激励 + Python 参考模型对照"
             className="bg-green-600 px-4 py-2 rounded text-sm disabled:bg-gray-700">{loadingSim?'...':'▶ 自动激励仿真'}</button>
-          <div className="flex items-center gap-1 text-[10px] text-gray-500">
+          {/* 仿真控制: 采样点数 (时间范围) + 时钟周期 (时间步进) */}
+          <div className="flex items-center gap-2 text-[10px] text-gray-500 bg-gray-800/40 rounded px-2 py-1" title="采样点 × 时钟周期 = 仿真总时长; 波形横轴与 VCD 都按此周期">
             <span>采样点:</span>
             <input type="range" min="5" max="100" value={sampleCount} onChange={e => setSampleCount(+e.target.value)} className="w-16 accent-blue-500" />
             <span className="text-gray-400 w-5">{sampleCount}</span>
+            <span className="text-gray-700">|</span>
+            <span>时钟周期:</span>
+            <select value={clkPeriod} onChange={e => setClkPeriod(+e.target.value)}
+              className="bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-[10px]">
+              {[10, 20, 40, 100].map(t => <option key={t} value={t}>{t}ns</option>)}
+            </select>
+            <span>总时长 <span className="text-gray-300">{sampleCount * clkPeriod}ns</span></span>
           </div>
           <button onClick={()=>runSimWith('tb')} disabled={loadingSim||!code||!tb.trim()} title={tb.trim()?'运行你/AI 编写的 testbench 定向测试':'需先 🤖 AI 生成 TB 或手写 TB'}
             className="bg-blue-600 px-4 py-2 rounded text-sm disabled:bg-gray-700 disabled:cursor-not-allowed">{loadingSim?'...':'▶ TB 仿真'}</button>
@@ -260,7 +270,7 @@ export default function Stage2() {
             <summary className="cursor-pointer hover:text-gray-300">❓ 自动激励仿真和波形是什么关系?</summary>
             <div className="mt-1 space-y-1 bg-gray-900/60 rounded p-2 leading-relaxed">
               <p>1️⃣ <b className="text-gray-300">自动激励仿真</b>：平台随机生成 N 组输入（激励）→ 同时喂给两套"计算器"：你的 Verilog 仿真 和 AI 生成的 Python 参考模型 → 逐组对比输出值 → 全部一致 = 匹配率 100%，证明你的 RTL 行为正确。</p>
-              <p>2️⃣ <b className="text-gray-300">波形</b>：N 个采样点的时序图 —— 横轴是时间（每采样点一个时钟周期 10ns），纵轴是信号值。你能直观看到 q 在什么输入下跳变、复位后是否清零。</p>
+              <p>2️⃣ <b className="text-gray-300">波形</b>：N 个采样点的时序图 —— 横轴是时间（每采样点一个时钟周期，周期在上方仿真控制中调整），纵轴是信号值。你能直观看到 q 在什么输入下跳变、复位后是否清零。</p>
               <p>3️⃣ <b className="text-gray-300">TB 仿真与自动激励的区别</b>：TB 仿真跑的是你（或 AI 生成）的 testbench —— 激励由 TB 代码定向指定（如专门测复位、测使能边沿），验证依据是 TB 里的断言打印；自动激励则是随机向量 + 参考模型对照。两者可并列运行、结果互不覆盖。</p>
               <p>4️⃣ <b className="text-gray-300">VCD 文件</b>：记录每个时钟沿的完整波形，下载后用 GTKWave / VS Code WaveTrace 插件打开可放大细看。</p>
             </div>
