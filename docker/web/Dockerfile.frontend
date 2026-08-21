@@ -1,0 +1,13 @@
+# iflow-lab 前端容器 (Next.js 16, 生产构建)
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci || npm install
+
+COPY frontend/ ./
+RUN npx next build
+
+EXPOSE 3000
+CMD ["npx", "next", "start"]

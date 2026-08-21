@@ -1,0 +1,6 @@
+frontend/node_modules
+frontend/.next
+tmp
+.git
+outputs
+__pycache__

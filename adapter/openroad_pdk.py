@@ -86,11 +86,15 @@ repair_timing
 clock_tree_synthesis -buf_list {cts_buffer}
 detailed_placement
 repair_timing
+# CTS 后网表 (门级 LVS 原理图侧: 与布线后网表同源, 含时钟树缓冲, 比对不含 CTS 增量)
+write_verilog {rd}/cts_netlist.v
 global_route
 {post_groute}
 report_checks -format full_clock > {rd}/timing.rpt
 report_design_area > {rd}/area.rpt
 write_def {rd}/route.def
+# 布线后网表 (门级 LVS 布局侧输入: 与综合网表比对连通性)
+write_verilog {rd}/route_netlist.v
 """
 
 
@@ -170,10 +174,14 @@ def run_physical_flow(pdk: str, params: dict, working_dir: str) -> dict:
             except ValueError: pass
 
     def_path = os.path.join(rd, "route.def")
+    net_path = os.path.join(rd, "route_netlist.v")
+    cts_path = os.path.join(rd, "cts_netlist.v")
     # GDS 不在本函数导出: OpenROAD 本身不写 GDS, 本机 KLayout 的 Ruby 绑定损坏,
     # 由上层 gds_export 步骤用 iEDA 的通用 LEF/DEF→GDS 转换完成 (adapter/gds_scripts/)
     return {"success": ok, "error": error if not ok else "", "run_dir": run_dir,
             "result_dir": rd,
             "metrics": metrics, "gds_path": "",
             "def_path": def_path if os.path.exists(def_path) else "",
+            "route_netlist": net_path if os.path.exists(net_path) else "",
+            "cts_netlist": cts_path if os.path.exists(cts_path) else "",
             "stdout": (stdout + stderr)[-2000:]}

@@ -66,25 +66,43 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     setOps(getOps())
   }, [])
   const wsRef = useRef<WebSocket | null>(null)
+  // Agent 反馈流连接状态 (后端重启/网络抖动时自动重连, 状态在底部栏显示)
+  const [wsStatus, setWsStatus] = useState<'connecting'|'connected'|'closed'>('connecting')
 
   useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8000/ws/global')
-    wsRef.current = ws
-    ws.onmessage = (e) => {
-      try {
-        const d = JSON.parse(e.data)
-        // Agent 反馈流: 步骤事件 + 收敛循环 + 归档交付 (后端双广播到 global 频道)
-        let msg = ''
-        if (d.type === 'step_start') msg = `▶ ${d.step}`
-        else if (d.type === 'step_done') msg = `${d.success===false?'❌':'✅'} ${d.step} ${d.duration?d.duration+'s':''}${d.status==='skipped'?' (跳过)':''}`
-        else if (d.type === 'convergence_round') msg = `🔁 收敛 R${d.round}: ${d.status==='rerun'?'🛠 回溯重跑':d.status==='converged'?'✅ 收敛':'🛑 止损'}`
-        else if (d.type === 'archive_ready') msg = `📦 归档交付: ${d.title}`
-        else if (d.type === 'log') msg = `📄 ${d.text}`
-        else msg = `· ${d.type||''} ${d.step||''}`
-        setWsLog(prev => [...prev.slice(-19), msg])
-      } catch {}
+    let ws: WebSocket | null = null
+    let closed = false
+    let retry: ReturnType<typeof setTimeout> | null = null
+    const connect = () => {
+      if (closed) return
+      setWsStatus('connecting')
+      ws = new WebSocket('ws://localhost:8000/ws/global')
+      wsRef.current = ws
+      ws.onopen = () => setWsStatus('connected')
+      ws.onmessage = (e) => {
+        try {
+          const d = JSON.parse(e.data)
+          // Agent 反馈流: 步骤事件 + 收敛循环 + 归档交付 (后端双广播到 global 频道)
+          let msg = ''
+          if (d.type === 'step_start') msg = `▶ ${d.step}`
+          else if (d.type === 'step_done') msg = `${d.success===false?'❌':'✅'} ${d.step} ${d.duration?d.duration+'s':''}${d.status==='skipped'?' (跳过)':''}`
+          else if (d.type === 'convergence_round') msg = `🔁 收敛 R${d.round}: ${d.status==='rerun'?'🛠 回溯重跑':d.status==='converged'?'✅ 收敛':'🛑 止损'}`
+          else if (d.type === 'archive_ready') msg = `📦 归档交付: ${d.title}`
+          else if (d.type === 'log') msg = `📄 ${d.text}`
+          else msg = `· ${d.type||''} ${d.step||''}`
+          setWsLog(prev => [...prev.slice(-19), msg])
+        } catch {}
+      }
+      // 断线自动重连 (后端重启会杀掉所有连接; 无重连则 Agent 面板永久静默)
+      ws.onclose = () => {
+        if (closed) return
+        setWsStatus('closed')
+        retry = setTimeout(connect, 2000)
+      }
+      ws.onerror = () => { try { ws?.close() } catch {} }
     }
-    return () => ws.close()
+    connect()
+    return () => { closed = true; if (retry) clearTimeout(retry); try { ws?.close() } catch {} }
   }, [])
 
   const saveSettings = async () => {
@@ -233,7 +251,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
         {/* Status bar */}
         <footer className="h-6 bg-gray-900 border-t border-gray-800 flex items-center justify-between px-4 text-xs text-gray-500 shrink-0">
-          <span className="text-green-400">🟢 Agent 就绪</span>
+          <span className={wsStatus === 'connected' ? 'text-green-400' : wsStatus === 'connecting' ? 'text-yellow-500' : 'text-red-400'}>
+            {wsStatus === 'connected' ? '🟢 Agent 就绪' : wsStatus === 'connecting' ? '🟡 Agent 连接中…' : '🔴 Agent 已断开, 自动重连中'}
+          </span>
           <span>API: localhost:8000</span>
         </footer>
       </body>

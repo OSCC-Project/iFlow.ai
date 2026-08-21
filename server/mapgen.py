@@ -98,7 +98,8 @@ def render_experiment_maps(exp: dict) -> dict:
         if not e["def_path"]:
             continue
         png = os.path.join(exp_dir, f"{e['combo_id']}_density.png")
-        title = " / ".join(f"{k}={v}" for k, v in e["config"].items())
+        title = " / ".join(f"{k}={v}" for k, v in e["config"].items()
+                           if not str(k).startswith("_"))
         if render_density_png(e["def_path"], png, title, vmax):
             e["png"] = png
     return {"maps": entries, "vmax": round(vmax, 1), "grid": GRID_N}

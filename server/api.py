@@ -327,6 +327,12 @@ def _execute_flow_steps(flow: dict, rtl_paths: list, tb_path: str, run_id: str,
                     try:
                         cm = ChipMATEConfig()
                         cm.api_key = settings.get("deepseek_api_key", "")
+                        # 本地 vLLM/自定义 OpenAI 兼容端点: llm_base_url 配置后接管 (LLM 统一配置)
+                        if settings.get("llm_base_url"):
+                            from server.llm import llm_config
+                            cm.api_base_url = llm_config()["base_url"]
+                            if llm_config()["model"]:
+                                cm.api_model = llm_config()["model"]
                         cr = ChipMATERunner(cm)
                         rtl_code = ""
                         if rtl_paths and os.path.exists(rtl_paths[0]):
@@ -520,6 +526,8 @@ def _execute_flow_steps(flow: dict, rtl_paths: list, tb_path: str, run_id: str,
                                         "metrics": _clean_metrics(r.get("metrics", {})),
                                         "gds_path": r.get("gds_path", ""),
                                         "def_path": r.get("def_path", ""),
+                                        "route_netlist": r.get("route_netlist", ""),
+                                        "cts_netlist": r.get("cts_netlist", ""),
                                         "reason": (f"OpenROAD {or_pdk} {partial}" if ok else
                                                    f"OpenROAD 失败: {str(r.get('error', ''))[:200]}"),
                                         "run_dir": r.get("run_dir", ""),
@@ -573,7 +581,43 @@ def _execute_flow_steps(flow: dict, rtl_paths: list, tb_path: str, run_id: str,
                                         "metrics": {"drc": r.get("drc", {}).get("violations")},
                                         "reason": "" if ok else f"DRC 执行失败: {err}"})
             elif step == "netgen_lvs":
-                step_result.update({"status": "skipped", "reason": "LVS 需版图+原理图文件, 阶段3暂跳过"})
+                # LVS 两级策略: magic 晶体管级 (有 extract 模型的 PDK) / 门级回退
+                # (OpenROAD 布线后网表 vs 综合网表); 均不可用则如实标注
+                gds_path = ""
+                route_nl = ""
+                cts_nl = ""
+                for sr in results:
+                    if sr["step"] == "gds_export":
+                        gds_path = sr.get("gds_path", "")
+                    if sr["step"] == "openroad_physical":
+                        route_nl = sr.get("route_netlist", "")
+                        cts_nl = sr.get("cts_netlist", "")
+                if not ieda_ctx["netlist"]:
+                    step_result.update({"status": "skipped",
+                                        "reason": "依赖未满足: 无综合网表"})
+                elif not gds_path and not route_nl:
+                    step_result.update({"status": "skipped",
+                                        "reason": "依赖未满足: 无 GDS 且无布线后网表"})
+                else:
+                    from adapter.magic_lvs import MagicLVSRunner
+                    or_pdk = params.get("or_pdk", "")
+                    tech_dir = ("/home/xu/iFlow/foundry/nangate45" if or_pdk == "nangate45"
+                                else "")  # sky130 本机无 magic tech → runner 如实报缺
+                    lvs_r = MagicLVSRunner({"tech_dir": tech_dir}).execute(design, {
+                        "GDS_FILE": gds_path, "NETLIST_FILE": ieda_ctx["netlist"],
+                        "TOP_MODULE": default_top, "ROUTE_NETLIST": route_nl,
+                        "CTS_NETLIST": cts_nl,
+                        "RUN_DIR": f"/home/xu/ic_agent_os/tmp/lvs_runs/{run_id}"})
+                    if lvs_r.get("success"):
+                        step_result.update({"status": "done", "success": True,
+                                            "metrics": {"lvs_match": lvs_r.get("lvs_match")},
+                                            "reason": ((f"LVS 通过 ({lvs_r.get('method', '')})"
+                                                        if lvs_r.get("lvs_match") else
+                                                        f"LVS 未通过 ({lvs_r.get('method', '')}): 版图与网表不匹配")),
+                                            "layout_spice": lvs_r.get("layout_spice", "")})
+                    else:
+                        step_result.update({"status": "skipped",
+                                            "reason": f"LVS 未运行: {lvs_r.get('error', '工具不可用')[:120]}"})
             elif step in ("cdc_check", "rdc_check", "upf_check", "low_power_check",
                           "dft_insert", "atpg", "ir_drop"):
                 # P2-3: 方案 6.2 能力池步骤, 当前环境未接入对应 EDA 工具 → 如实标注跳过
@@ -892,9 +936,9 @@ def api_rtl_generate_sva(req: RTLGenReq):
         result["method"] = "template"
         return result
 
-    # Step 2: 模板不够 → LLM 自由生成
+    # Step 2: 模板不够 → LLM 自由生成 (无 DeepSeek key 且无本地 LLM 端点 → 无可用方法)
     api_key = settings.get("deepseek_api_key", os.environ.get("DEEPSEEK_API_KEY", ""))
-    if not api_key:
+    if not api_key and not settings.get("llm_base_url"):
         return {"sva": "", "analysis": result.get("analysis", ""), "method": "none", "error": "无 API Key"}
 
     try:
@@ -923,12 +967,9 @@ Module:
 {code[:1500]}
 ```
 """
-        import urllib.request
-        data = json.dumps({"model": "deepseek-chat", "messages": [{"role":"user","content":prompt}], "temperature":0.1, "max_tokens":1024}).encode()
-        req2 = urllib.request.Request("https://api.deepseek.com/v1/chat/completions", data=data, headers={"Content-Type":"application/json","Authorization":f"Bearer {api_key}"})
-        with urllib.request.urlopen(req2, timeout=60) as resp:
-            body = json.loads(resp.read())
-            sva = body["choices"][0]["message"]["content"].replace("```","").strip()
+        from server.llm import chat_request
+        sva = chat_request("deepseek-chat", [{"role": "user", "content": prompt}],
+                           temperature=0.1, max_tokens=1024, timeout=60).replace("```", "").strip()
         # LLM 常把 ```systemverilog 围栏残留成裸单词 "systemverilog" → yosys 解析错误
         sva = re.sub(r'^\s*(?:systemverilog|system_verilog)\s*\n?', '', sva, flags=re.IGNORECASE)
         sva = re.sub(r'^\s*verilog\s*\n?', '', sva, flags=re.IGNORECASE)
@@ -1428,7 +1469,7 @@ def api_chat_compose(req: ChatComposeReq):
 def _parse_intent(message: str) -> dict:
     """用 LLM 解析用户意图 → {target, depth} 或 {clarify: '...'}"""
     api_key = settings.get("deepseek_api_key", os.environ.get("DEEPSEEK_API_KEY", ""))
-    if not api_key:
+    if not api_key and not settings.get("llm_base_url"):
         return _keyword_parse(message)
 
     prompt = f"""用户在芯片设计AI实训平台上说："{message}"
@@ -1444,14 +1485,11 @@ depth: quick=快速(~2min), standard=标准(~10min), signoff=签核(~30min)
 
 只返回JSON，不要markdown。"""
     try:
-        import urllib.request
-        data = json.dumps({"model": "deepseek-chat", "messages": [{"role":"user","content":prompt}], "temperature":0, "max_tokens":300}).encode()
-        req = urllib.request.Request("https://api.deepseek.com/v1/chat/completions", data=data, headers={"Content-Type":"application/json","Authorization":f"Bearer {api_key}"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.loads(resp.read())
-            content = body["choices"][0]["message"]["content"].strip()
-            if content.startswith("```"): content = content.split("\n",1)[1].rsplit("\n",1)[0]
-            return json.loads(content)
+        from server.llm import chat_request
+        content = chat_request("deepseek-chat", [{"role": "user", "content": prompt}],
+                               temperature=0, max_tokens=300, timeout=15).strip()
+        if content.startswith("```"): content = content.split("\n",1)[1].rsplit("\n",1)[0]
+        return json.loads(content)
     except:
         return _keyword_parse(message)
 
@@ -1501,10 +1539,16 @@ def api_experiment_create(req: ExperimentReq):
         lib_paths[safe] = p
     for combo in exp["combos"]:
         c = combo["config"]
-        if c.get("design") in rtl_paths:
-            c["rtl_path"] = rtl_paths[c["design"]]
+        d = c.get("design", req.design)
+        # 设计版本变量: 上传库 {design}_{version}.v (如 gcd_v2.v) 优先作为该组合的 RTL
+        # 注入用私有键 _rtl_path/_liberty_path (下划线开头不进入对比展示/纵向归组)
+        ver = str(c.get("设计版本", "")).strip()
+        if d in rtl_paths:
+            c["_rtl_path"] = rtl_paths[d]
+        elif ver and f"{d}_{ver}" in rtl_paths:
+            c["_rtl_path"] = rtl_paths[f"{d}_{ver}"]
         if str(c.get("PDK", "")) in lib_paths:
-            c["liberty_path"] = lib_paths[c["PDK"]]
+            c["_liberty_path"] = lib_paths[c["PDK"]]
     return exp
 
 @app.post("/api/experiment/{exp_id}/run")
@@ -1546,10 +1590,18 @@ def api_flow_run_internal(design: str, config: dict, push_ws=None) -> dict:
     except (ValueError, TypeError):
         freq = 100.0
 
+    # 设计版本变量: 对应上传 (gcd_v2.v) 已由 experiment/create 注入 _rtl_path;
+    # 指定了版本但无对应上传 → 回退默认设计 RTL, 结果里如实标注 (不静默)
+    design_version = str(config.get("设计版本", "")).strip()
+    version_note = ""
+    if design_version and not config.get("_rtl_path"):
+        version_note = (f"设计版本 {design_version}: 未上传 {design}_{design_version}.v, "
+                        f"已回退到默认 {design} RTL")
+
     # 加载 RTL (优先用户上传的设计)
     rtl_file = ""
-    if config.get("rtl_path") and os.path.exists(config["rtl_path"]):
-        rtl_file = config["rtl_path"]
+    if config.get("_rtl_path") and os.path.exists(config["_rtl_path"]):
+        rtl_file = config["_rtl_path"]
     else:
         for cand in (f"/home/xu/iFlow/rtl/{design}/{design}.v",
                      f"/home/xu/iFlow/rtl/{design}.v"):
@@ -1574,14 +1626,14 @@ def api_flow_run_internal(design: str, config: dict, push_ws=None) -> dict:
     tool = "ieda" if physical else ("openroad" if or_physical else "none")
     if physical:
         steps += ["ieda_floorplan", "ieda_place", "ieda_cts", "ieda_route",
-                  "idrc_drc", "gds_export"]
+                  "idrc_drc", "gds_export", "netgen_lvs"]
     elif or_physical:
         steps = [s for s in steps if s != "ista_sta"] + [
-            "openroad_physical", "idrc_drc", "gds_export"]
+            "openroad_physical", "idrc_drc", "gds_export", "netgen_lvs"]
     # 用户上传的自定义工艺 (liberty_uploads): PPA-only 路径 (综合+OpenSTA, 无物理)
     custom_lib = ""
-    if config.get("liberty_path") and os.path.exists(config["liberty_path"]):
-        custom_lib = config["liberty_path"]
+    if config.get("_liberty_path") and os.path.exists(config["_liberty_path"]):
+        custom_lib = config["_liberty_path"]
         tool = "opensta"
     liberty = custom_lib or {"sky130": _IEDA_LIBERTY,
                "nangate45": _NANGATE_LIBERTY,
@@ -1620,7 +1672,8 @@ def api_flow_run_internal(design: str, config: dict, push_ws=None) -> dict:
                                      do_physical=physical)
     runs[run_id] = {"flow_id": flow_id, "results": results, "time": time.time(), "files": []}
     return {"results": results, "run_id": run_id, "pdk": pdk,
-            "physical_enabled": physical or or_physical, "tool": tool}
+            "physical_enabled": physical or or_physical, "tool": tool,
+            "design_version_note": version_note}
 
 @app.get("/api/experiments")
 def api_experiments_list():

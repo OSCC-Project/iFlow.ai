@@ -1,17 +1,28 @@
 'use client'
 import Link from 'next/link'
 import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { withToken } from '@/lib/authFetch'
 
 const API = 'http://localhost:8000'
 
 export default function Home() {
+  const router = useRouter()
   const [health, setHealth] = useState<any>(null)
-  const [flows, setFlows] = useState<any[]>([])
+  const [exps, setExps] = useState<any[]>([])
 
   useEffect(() => {
     fetch(`${API}/api/health`).then(r => r.json()).then(setHealth).catch(() => {})
-    fetch(`${API}/api/flows`).then(r => r.json()).then(d => setFlows(Array.isArray(d) ? d : [])).catch(() => {})
+    // 实验历史需要鉴权 (带 token); 后端启动时从磁盘恢复, 历史不随重启丢失
+    fetch(withToken(`${API}/api/experiments`)).then(r => r.json())
+      .then(d => setExps(Array.isArray(d) ? d : [])).catch(() => {})
   }, [])
+
+  // 点击历史实验 → 标记为当前实验并跳转对比页 (对比页挂载时按 ID 恢复结果)
+  const openExp = (id: string) => {
+    localStorage.setItem('cmp_exp_id', id)
+    router.push('/compare')
+  }
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
@@ -48,19 +59,23 @@ export default function Home() {
       {/* Quick links */}
       <div className="grid grid-cols-2 gap-4">
         <div className="bg-gray-900 border border-gray-700 rounded p-4">
-          <h4 className="text-sm font-medium text-gray-300 mb-2">📊 最近 Flow</h4>
-          {flows.length > 0 ? (
+          <h4 className="text-sm font-medium text-gray-300 mb-2">📊 对比实验历史 <span className="text-[10px] text-gray-600">(点击恢复)</span></h4>
+          {exps.length > 0 ? (
             <div className="space-y-1">
-              {flows.slice(-5).reverse().map((f: any) => (
-                <div key={f.flow_id} className="flex justify-between text-xs text-gray-400">
-                  <span>{f.flow_id}</span>
-                  <span>{f.scene}</span>
-                  <span>{f.status}</span>
-                </div>
+              {exps.slice(-5).reverse().map((e: any) => (
+                <button key={e.id} onClick={() => openExp(e.id)} title="打开该实验的结果"
+                  className="w-full flex justify-between items-center text-xs text-gray-400 hover:bg-gray-800/60 rounded px-1.5 py-1 text-left">
+                  <span className="font-mono">{e.id}</span>
+                  <span className="text-gray-500">{e.design}</span>
+                  <span>{e.completed || 0}/{e.total || 0} 组合</span>
+                  <span className={e.status === 'done' ? 'text-green-400' : 'text-yellow-500'}>
+                    {e.status === 'done' ? '完成' : e.status}
+                  </span>
+                </button>
               ))}
             </div>
           ) : (
-            <p className="text-xs text-gray-500">暂无记录，去阶段页创建第一个 Flow</p>
+            <p className="text-xs text-gray-500">暂无实验，去 <Link href="/compare" className="text-blue-400">对比实验</Link> 创建第一个</p>
           )}
         </div>
         <div className="bg-gray-900 border border-gray-700 rounded p-4">

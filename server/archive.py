@@ -53,7 +53,14 @@ def _checklist(flow: dict, results: list, metrics: dict) -> list:
     if has_drc and drc is not None:
         items.append({"name": "DRC 物理规则", "state": "pass" if drc == 0 else "fail",
                       "note": f"{int(drc)} 违例" if drc else "0 违例"})
-    items.append({"name": "LVS 版图一致性", "state": "skip", "note": "Netgen 未接入 (如实标注)"})
+    # LVS: netgen_lvs 步骤有真实结果则如实判定, 否则标注跳过原因 (magic 未装/无 GDS 等)
+    lvs = steps.get("netgen_lvs", {})
+    if lvs.get("status") == "done":
+        items.append({"name": "LVS 版图一致性",
+                      "state": "pass" if lvs.get("metrics", {}).get("lvs_match") else "fail",
+                      "note": "版图与网表匹配" if lvs.get("metrics", {}).get("lvs_match") else "版图与网表不匹配"})
+    else:
+        items.append({"name": "LVS 版图一致性", "state": "skip", "note": lvs.get("reason", "LVS 未运行")})
     items.append({"name": "多 corner STA", "state": "skip", "note": "仅 tt corner (单 corner)"})
     if "gds_export" in steps:
         items.append({"name": "GDS 版图导出", "state": "pass" if has_gds else "fail",

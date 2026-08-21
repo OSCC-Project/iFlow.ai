@@ -1,8 +1,9 @@
 """
 AI 对话引擎 — 完整项目上下文 + 多轮对话 + 自然决策
 """
-import json, os, urllib.request
+import json, os
 from server.ai_knowledge import SYSTEM_PROMPT
+from server.llm import chat_request
 
 
 class ChatSession:
@@ -23,24 +24,10 @@ class ChatSession:
         messages += self.history[-20:]
 
         try:
-            # deepseek-reasoner: 推理能力强，适合分析芯片设计问题
-            # deepseek-chat: 速度快但弱，作为备选
+            # 默认 deepseek-reasoner (推理强, 适合芯片设计分析); llm_model 配置后走配置模型
             model = os.environ.get("CHAT_MODEL", "deepseek-reasoner")
-            data = json.dumps({
-                "model": model,
-                "messages": messages,
-                "temperature": 0.7,
-                "max_tokens": 2048,
-            }).encode()
-            req = urllib.request.Request(
-                "https://api.deepseek.com/v1/chat/completions",
-                data=data,
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
-            )
             # P2-8: deepseek-reasoner 实测 17s+, 30s 易超时 → 90s
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                body = json.loads(resp.read())
-                reply = body["choices"][0]["message"]["content"]
+            reply = chat_request(model, messages, temperature=0.7, max_tokens=2048, timeout=90)
         except Exception as e:
             # P2-8: 调用失败不写入历史 (避免把错误注入上下文), 也不伪造 assistant 回复
             self.history.pop()  # 回滚刚 append 的用户消息, 下次可重试

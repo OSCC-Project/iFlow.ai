@@ -1,0 +1,49 @@
+# iflow-lab web 平台编排 (宿主机 EDA 模式)
+#
+# 设计取舍: EDA 工具链 (iEDA/OpenROAD/yosys/iverilog/verilator/verible/sby、
+#           PDK 数据、RTL 用例) 全部在宿主机, 容器只跑 web 服务并通过挂载调用。
+# 完整容器化 EDA 工具链另见 ../ (CLI 时代规划, 需逐步迁移)。
+#
+# 启动: docker compose up -d --build
+# 前端 http://localhost:3000  ·  后端 http://localhost:8000
+
+services:
+  server:
+    build:
+      context: ../..              # 仓库根 (server/ adapter/ 在根下)
+      dockerfile: docker/web/Dockerfile.server
+    container_name: iflow-server
+    ports:
+      - "8000:8000"
+    volumes:
+      # 宿主 EDA 工具链与数据 (只读挂载, 路径与本机部署一致)
+      - /home/xu/iEDA:/home/xu/iEDA:ro
+      - /home/xu/OpenROAD-flow-scripts:/home/xu/OpenROAD-flow-scripts:ro
+      - /home/xu/iFlow:/home/xu/iFlow:ro
+      - /usr/bin/iverilog:/usr/bin/iverilog:ro
+      - /usr/bin/vvp:/usr/bin/vvp:ro
+      - /usr/bin/verilator:/usr/bin/verilator:ro
+      - /usr/bin/yosys:/usr/bin/yosys:ro
+      - /usr/bin/sby:/usr/bin/sby:ro
+      - /usr/bin/sta:/usr/bin/sta:ro
+      - /usr/bin/netgen:/usr/bin/netgen:ro
+      - /usr/local/bin/verible-verilog-lint:/usr/local/bin/verible-verilog-lint:ro
+      # 运行产物与密钥 (可写)
+      - /home/xu/ic_agent_os/tmp:/home/xu/ic_agent_os/tmp
+      - /home/xu/ic_agent_os/server/settings.json:/app/server/settings.json:ro
+      - /home/xu/ic_agent_os/server/.auth_secret:/app/server/.auth_secret:ro
+      - /home/xu/ic_agent_os/server/users.db:/app/server/users.db
+      - /home/xu/ic_agent_os/server/experiments:/app/server/experiments
+      - /tmp/iflow_workspace:/tmp/iflow_workspace
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: docker/web/Dockerfile.frontend
+    container_name: iflow-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - server
+    restart: unless-stopped

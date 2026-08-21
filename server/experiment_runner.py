@@ -12,6 +12,26 @@ class ExperimentRunner:
         self.storage_dir = storage_dir
         os.makedirs(storage_dir, exist_ok=True)
         self._experiments: dict[str, dict] = {}
+        self._load_saved()
+
+    def _load_saved(self):
+        """启动时从磁盘恢复历史实验 (后端重启不丢历史, 前端按 ID 找回结果)"""
+        try:
+            for fn in sorted(os.listdir(self.storage_dir)):
+                if not fn.endswith(".json"):
+                    continue
+                try:
+                    with open(os.path.join(self.storage_dir, fn)) as f:
+                        data = json.load(f)
+                    exp = data.get("experiment")
+                    if exp and exp.get("id"):
+                        exp.setdefault("summary", data.get("summary"))
+                        exp.setdefault("status", "done")
+                        self._experiments[exp["id"]] = exp
+                except Exception:
+                    continue  # 损坏/旧格式文件跳过, 不影响启动
+        except OSError:
+            pass
 
     def create(self, design: str, variables: dict) -> dict:
         """创建实验 — 展开笛卡尔积"""
@@ -70,8 +90,9 @@ class ExperimentRunner:
         exp["status"] = "done"
         exp["finished_at"] = time.time()
 
-        # 生成汇总表
+        # 生成汇总表 (summary 一并存入 exp: 前端离开页面后返回时据此恢复状态)
         summary = self._build_summary(exp)
+        exp["summary"] = summary
         summary_path = os.path.join(self.storage_dir, f"{exp_id}.json")
         with open(summary_path, "w") as f:
             json.dump({"experiment": exp, "summary": summary}, f, indent=2, default=str)
@@ -82,7 +103,9 @@ class ExperimentRunner:
         """构建对比总表"""
         rows = []
         for r in exp.get("results", []):
-            row = {"combo": r["config"]}
+            # 下划线开头的键是执行注入 (_rtl_path/_liberty_path), 不进对比展示/纵向归组
+            row = {"combo": {k: v for k, v in r["config"].items()
+                             if not str(k).startswith("_")}}
             if "result" in r:
                 metrics = self._extract_metrics(r["result"])
                 row.update(metrics)

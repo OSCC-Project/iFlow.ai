@@ -57,8 +57,12 @@ function MultiSelect({ options, selected, onToggle, onClear, placeholder }: {
   )
 }
 
+// 组合配置的展示视图: 过滤执行注入的私有键 (_rtl_path 等, 不进展示/归组/匹配)
+const visibleConfig = (c: any) => Object.fromEntries(
+  Object.entries(c || {}).filter(([k]) => !k.startsWith('_')))
+
 // 组合的唯一键 (行勾选/详情展开按它定位, 与排序无关)
-const comboKey = (row: any) => JSON.stringify(row.combo || {})
+const comboKey = (row: any) => JSON.stringify(visibleConfig(row.combo || {}))
 
 // 区域 E: 同工艺纵向结论 — 把只在一个变量 (非设计/PDK) 上不同的行归组
 function buildVerticalGroups(rows: any[]) {
@@ -120,10 +124,19 @@ export default function Compare() {
   // 行勾选 (comboKey 集合) + 区域 D 详情展开的当前组合
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set())
   const [detailKey, setDetailKey] = useState<string | null>(null)
+  // 运行中基本信息: 实验 ID / 组合配置 / 完成进度 (轮询后端汇总状态)
+  const [expId, setExpId] = useState('')
+  const expIdRef = useRef('')
+  const [comboMeta, setComboMeta] = useState<Record<string, any>>({})
+  const [expPoll, setExpPoll] = useState<{ completed: number; total: number; statuses: Record<string, string> } | null>(null)
+  // 离开页面后返回的状态恢复提示
+  const [restoredHint, setRestoredHint] = useState('')
+  const doneHandledRef = useRef(false)
   // 用户自主添加: 设计 RTL 上传 + 工艺 liberty 上传 (PPA-only)
   const [designUploads, setDesignUploads] = useState<Record<string, string>>({})
   const [libUploads, setLibUploads] = useState<Record<string, string>>({})
-  const wsRefs = useRef<WebSocket[]>([])
+  const wsRefs = useRef<{ ws: WebSocket | null }[]>([])
+  const wsGenRef = useRef(0)
 
   const onUploadDesigns = async (files: FileList | null) => {
     if (!files) return
@@ -144,16 +157,146 @@ export default function Compare() {
     setLibUploads(next)
   }
 
-  useEffect(() => () => { wsRefs.current.forEach(w => w.close()) }, [])
+  useEffect(() => () => {
+    wsGenRef.current++
+    wsRefs.current.forEach(h => { try { h.ws?.close() } catch {} })
+  }, [])
+
+  // 状态落 localStorage: 离开页面 (首页/阶段1) 再返回时恢复实验状态
+  useEffect(() => { if (expId) localStorage.setItem('cmp_exp_id', expId) }, [expId])
+  useEffect(() => {
+    try { localStorage.setItem('cmp_progress', JSON.stringify(progress)) } catch {}
+  }, [progress])
+
+  // 为每个组合建立 WS, 实时显示步骤进度 (runExperiment 与状态恢复共用);
+  // 断线自动重连 (后端重启等), 新订阅/页面卸载后旧代失效
+  const subscribeWs = (eid: string, combos: any[]) => {
+    wsRefs.current.forEach(h => { try { h.ws?.close() } catch {} })
+    const gen = ++wsGenRef.current
+    wsRefs.current = (combos || []).map((c: any) => {
+      const holder: { ws: WebSocket | null } = { ws: null }
+      const open = () => {
+        if (gen !== wsGenRef.current) return
+        const ws = new WebSocket(`ws://localhost:8000/ws/exp_${eid}_${c.id}`)
+        holder.ws = ws
+        ws.onmessage = (e) => {
+          try {
+            const ev = JSON.parse(e.data)
+            if (ev.type === 'step_start') {
+              setProgress(p => ({ ...p, [c.id]: { step: ev.step, status: 'running', log: '▶ ' + ev.step } }))
+            } else if (ev.type === 'step_done') {
+              const icon = ev.status === 'failed' ? '❌' : ev.status === 'skipped' ? '⏭️' : '✅'
+              setProgress(p => ({ ...p, [c.id]: { step: ev.step, status: ev.status, log: `${icon} ${ev.step} (${ev.duration}s)` } }))
+            }
+          } catch {}
+        }
+        ws.onclose = () => {
+          if (gen !== wsGenRef.current) return
+          setTimeout(() => { if (gen === wsGenRef.current && holder.ws === ws) open() }, 2000)
+        }
+      }
+      open()
+      return holder
+    })
+  }
+
+  // 挂载时恢复上次实验: 后端 run 在服务端继续执行 (离开页面不中断),
+  // 返回时按实验 ID 找回: 已完成 → 直接恢复结果; 运行中 → 续接轮询+WS
+  const restoreRef = useRef(false)
+  useEffect(() => {
+    if (restoreRef.current) return
+    restoreRef.current = true
+    const restore = async () => {
+      const savedId = localStorage.getItem('cmp_exp_id')
+      if (!savedId) return
+      try {
+        const r = await fetch(withToken(`${API}/api/experiments`))
+        const exps = await r.json()
+        const e = exps.find((x: any) => x.id === savedId)
+        if (!e) {
+          setRestoredHint('上次实验已不在后端内存 (后端可能已重启), 请重新运行')
+          localStorage.removeItem('cmp_exp_id')
+          return
+        }
+        setExpId(e.id); expIdRef.current = e.id
+        setComboMeta(Object.fromEntries((e.combos || []).map((c: any) => [c.id, c.config])))
+        try { setProgress(JSON.parse(localStorage.getItem('cmp_progress') || '{}')) } catch {}
+        if (e.status === 'done' && e.summary) {
+          doneHandledRef.current = true
+          setResults({ experiment: e, summary: e.summary })
+          setExpPoll({
+            completed: e.completed || 0, total: e.total || 0,
+            statuses: Object.fromEntries((e.combos || []).map((c: any) => [c.id, c.status])),
+          })
+          setRestoredHint(`已恢复实验 ${e.id} 的结果 (${e.total || 0} 组合)`)
+          try {
+            const rm = await fetch(withToken(`${API}/api/experiment/${e.id}/maps`))
+            setMaps(await rm.json())
+          } catch { setMaps(null) }
+        } else if (e.status === 'running' || e.status === 'created') {
+          setRunning(true)
+          setRestoredHint(`上次实验 ${e.id} 仍在运行, 已恢复进度监控`)
+          subscribeWs(e.id, e.combos || [])
+        }
+      } catch { setRestoredHint('恢复上次实验失败: 连接后端失败') }
+    }
+    restore()
+  }, [])
+
+  // 运行中每 2s 轮询实验汇总 (完成数/各组合状态), 展示基本进度信息;
+  // 页面离开期间实验跑完时, 由轮询完成结果收尾
+  useEffect(() => {
+    if (!running) return
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(withToken(`${API}/api/experiments`))
+        const exps = await r.json()
+        const e = exps.find((x: any) => x.id === expIdRef.current)
+        if (!e) return
+        setExpPoll({
+          completed: e.completed || 0, total: e.total || 0,
+          statuses: Object.fromEntries((e.combos || []).map((c: any) => [c.id, c.status])),
+        })
+        if (e.status === 'done' && e.summary && !doneHandledRef.current) {
+          doneHandledRef.current = true
+          setResults({ experiment: e, summary: e.summary })
+          setRunning(false)
+          setRestoredHint(`实验 ${e.id} 完成`)
+          try {
+            const rm = await fetch(withToken(`${API}/api/experiment/${e.id}/maps`))
+            setMaps(await rm.json())
+          } catch { setMaps(null) }
+        }
+      } catch {}
+    }, 2000)
+    return () => clearInterval(t)
+  }, [running])
 
   const addVar = () => setVariables([...variables, { id: Date.now().toString(), type: '工艺 (PDK)', values: '' }])
   const removeVar = (id: string) => setVariables(variables.filter(v => v.id !== id))
   const comboCount = variables.reduce((n, v) => n * (v.values.split(',').filter(Boolean).length || 1), 1)
 
-  // 设计变量的候选值: 固定设计 + 用户上传的设计 (上传后立即可选)
+  // 预计耗时: 按 PDK 口径估算 (实测单组合: sky130 iEDA 全流程 ~1min,
+  // nangate45/asap7 OpenROAD ~15-30s, 自定义 liberty PPA-only 更短)
+  const estTimeText = (() => {
+    const pdks = (variables.find(v => v.type === '工艺 (PDK)')?.values || 'sky130')
+      .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+    const per = pdks.length
+      ? pdks.map(p => p === 'sky130' ? 1.2 : (p === 'nangate45' || p === 'asap7') ? 0.5 : 0.3)
+          .reduce((a, b) => a + b, 0) / pdks.length
+      : 0.5
+    const mins = comboCount * per
+    return mins >= 1 ? `~${mins.toFixed(1)} 分钟` : `~${Math.max(10, Math.round(mins * 60))} 秒`
+  })()
+
+  // 各类型变量的候选值: 固定设计 + 用户上传的设计 (上传后立即可选)
   const allDesigns = ['gcd', 'aes_cipher_top', 'uart', ...Object.keys(designUploads)]
-  // 点击候选 chip → 在"设计"变量值里切换
-  const toggleDesignValue = (varId: string, name: string) => {
+  // 工艺候选: 平台固定 PDK + 用户上传的 liberty (上传后立即可选)
+  const allPdks = ['sky130', 'nangate45', 'asap7', ...Object.keys(libUploads)]
+  // 利用率候选: 常见取值 (30% 起步, 太高会布不下如实失败)
+  const allUtils = ['30%', '35%', '40%', '45%', '50%', '55%', '60%', '65%', '70%', '75%', '80%']
+  // 在变量的值里切换候选 (勾选/取消)
+  const toggleVarValue = (varId: string, name: string) => {
     setVariables(variables.map(v => {
       if (v.id !== varId) return v
       const cur = v.values.split(',').map(s => s.trim()).filter(Boolean)
@@ -162,9 +305,40 @@ export default function Compare() {
     }))
   }
 
+  // 变量值控件: 设计/工艺/利用率用下拉多选, 其余 (频率/设计版本/工具参数) 自由输入
+  const valueControl = (v: VarConfig) => {
+    const opts = v.type === '设计' ? allDesigns
+      : v.type === '工艺 (PDK)' ? allPdks
+      : v.type === '利用率' ? allUtils : null
+    if (!opts) return (
+      <>
+        <label className="text-xs text-gray-500 block mb-1">值 (逗号分隔)</label>
+        <input value={v.values} onChange={e => {
+          setVariables(variables.map(x => x.id===v.id ? {...x, values: e.target.value} : x))
+        }} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs w-full"
+          placeholder={v.type === '目标频率 (MHz)' ? '100, 200' : v.type === '设计版本' ? 'v1, v2' : '逗号分隔'} />
+      </>
+    )
+    const selected = v.values.split(',').map(s => s.trim()).filter(Boolean)
+    return (
+      <>
+        <label className="text-xs text-gray-500 block mb-1">值</label>
+        <MultiSelect
+          options={opts}
+          selected={selected}
+          onToggle={name => toggleVarValue(v.id, name)}
+          onClear={() => setVariables(variables.map(x => x.id === v.id ? { ...x, values: '' } : x))}
+          placeholder={v.type === '设计' ? '选择设计...' : v.type === '工艺 (PDK)' ? '选择工艺...' : '选择利用率...'} />
+      </>
+    )
+  }
+
   const runExperiment = async () => {
     setRunning(true); setResults(null); setProgress({})
     setSelectedRows(new Set()); setDetailKey(null)
+    setExpPoll(null)
+    doneHandledRef.current = false
+    setRestoredHint('')
     try {
       // 变量名翻译为后端 config key (如 "工艺 (PDK)" → "PDK")
       const vars: any = {}
@@ -179,28 +353,22 @@ export default function Compare() {
           design_uploads: designUploads, liberty_uploads: libUploads })
       })
       const exp = await r1.json()
+      setExpId(exp.id); expIdRef.current = exp.id
+      setComboMeta(Object.fromEntries((exp.combos || []).map((c: any) => [c.id, c.config])))
 
       // P1-6/P0-3: 每个组合建立 WS, 实时显示步骤进度
-      wsRefs.current.forEach(w => w.close())
-      wsRefs.current = (exp.combos || []).map((c: any) => {
-        const ws = new WebSocket(`ws://localhost:8000/ws/exp_${exp.id}_${c.id}`)
-        ws.onmessage = (e) => {
-          try {
-            const ev = JSON.parse(e.data)
-            if (ev.type === 'step_start') {
-              setProgress(p => ({ ...p, [c.id]: { step: ev.step, status: 'running', log: '▶ ' + ev.step } }))
-            } else if (ev.type === 'step_done') {
-              const icon = ev.status === 'failed' ? '❌' : ev.status === 'skipped' ? '⏭️' : '✅'
-              setProgress(p => ({ ...p, [c.id]: { step: ev.step, status: ev.status, log: `${icon} ${ev.step} (${ev.duration}s)` } }))
-            }
-          } catch {}
-        }
-        return ws
-      })
+      subscribeWs(exp.id, exp.combos || [])
 
       const r2 = await fetch(`${API}/api/experiment/${exp.id}/run`, { method: 'POST' })
       const data = await r2.json()
+      doneHandledRef.current = true
       setResults(data)
+      // 最终进度 (轮询可能停在完成前最后一拍, 用 run 返回值校正)
+      const e2 = data?.experiment
+      if (e2) setExpPoll({
+        completed: e2.completed || 0, total: e2.total || 0,
+        statuses: Object.fromEntries((e2.combos || []).map((c: any) => [c.id, c.status])),
+      })
       // 区域 C: 空间 Map (统一色标密度热力图)
       try {
         const rm = await fetch(`${API}/api/experiment/${exp.id}/maps`)
@@ -212,16 +380,16 @@ export default function Compare() {
 
   const rows: any[] = results?.summary?.rows || []
   const chartData = rows.map((r: any) => ({
-    name: Object.entries(r.combo || {}).map(([k, v]) => `${k}=${v}`).join(' / ') || 'combo',
+    name: Object.entries(visibleConfig(r.combo || {})).map(([k, v]) => `${k}=${v}`).join(' / ') || 'combo',
     wns: typeof r.wns_ns === 'number' ? r.wns_ns : null,
     area: typeof r.area_mm2 === 'number' ? r.area_mm2 : null,
     drc: typeof r.drc_violations === 'number' ? r.drc_violations : null,
     lint: r.lint_violations,
   }))
 
-  // 区域 D: 组合 config → 完整步骤明细 (与 rows 同源, 后端同一对象序列化)
+  // 区域 D: 组合 config → 完整步骤明细 (键与 comboKey 同口径: 过滤私有键)
   const detailMap = new Map<string, any>(
-    (results?.experiment?.results || []).map((r: any) => [JSON.stringify(r.config || {}), r]))
+    (results?.experiment?.results || []).map((r: any) => [JSON.stringify(visibleConfig(r.config || {})), r]))
   const detailEntry = detailKey ? detailMap.get(detailKey) : null
 
   // 区域 A: 列排序 (点击表头切换)
@@ -325,13 +493,20 @@ export default function Compare() {
     <div className="max-w-6xl mx-auto space-y-4">
       <h2 className="text-lg font-bold text-blue-400">📊 对比实验</h2>
 
+      {/* 离开页面后返回的状态恢复提示 */}
+      {restoredHint && (
+        <div className="bg-blue-900/20 border border-blue-800 rounded p-2 text-[11px] text-blue-300">
+          {restoredHint}
+        </div>
+      )}
+
       {/* Config */}
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-3">
           {/* 用户自主添加: 上传设计 RTL / 上传工艺 liberty (PPA-only) */}
           <div className="space-y-2 bg-gray-800/30 rounded p-2">
             <div>
-              <label className="text-xs text-gray-500 block mb-1">⬆ 上传设计 (.v, 可多选) — 加入「设计」变量候选</label>
+              <label className="text-xs text-gray-500 block mb-1">⬆ 上传设计 (.v, 可多选) — 加入「设计」变量候选；文件名带版本后缀 (如 gcd_v2.v) 可配合「设计版本」变量做同设计多版本对比</label>
               <input type="file" multiple accept=".v" onChange={e => onUploadDesigns(e.target.files)}
                 className="text-[11px] text-gray-400 file:bg-gray-700 file:border-0 file:rounded file:px-2 file:py-1 file:text-gray-300 file:mr-2"/>
               {Object.keys(designUploads).length > 0 && (
@@ -358,27 +533,7 @@ export default function Compare() {
                   {VAR_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
                 </select>
               </div>
-              <div className="flex-1">
-                {v.type === '设计' ? (
-                  <>
-                    <label className="text-xs text-gray-500 block mb-1">值</label>
-                    <MultiSelect
-                      options={allDesigns}
-                      selected={v.values.split(',').map(s => s.trim()).filter(Boolean)}
-                      onToggle={name => toggleDesignValue(v.id, name)}
-                      onClear={() => setVariables(variables.map(x => x.id === v.id ? { ...x, values: '' } : x))}
-                      placeholder="选择设计..." />
-                  </>
-                ) : (
-                  <>
-                    <label className="text-xs text-gray-500 block mb-1">值 (逗号分隔)</label>
-                    <input value={v.values} onChange={e => {
-                      setVariables(variables.map(x => x.id===v.id ? {...x, values: e.target.value} : x))
-                    }} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs w-full"
-                      placeholder="sky130, nangate45" />
-                  </>
-                )}
-              </div>
+              <div className="flex-1">{valueControl(v)}</div>
               <button onClick={() => removeVar(v.id)} className="text-red-400 text-xs pb-1">✕</button>
             </div>
           ))}
@@ -393,7 +548,7 @@ export default function Compare() {
             <div>默认设计: <span className="text-gray-200">{design}</span> <span className="text-gray-600">(加「设计」变量可多设计对比)</span></div>
             <div>变量数: {variables.length}</div>
             <div>组合总数: <span className="text-blue-400 text-lg font-bold">{comboCount}</span></div>
-            <div>预计耗时: ~{comboCount * 10} 分钟</div>
+            <div>预计耗时: <span className="text-gray-200">{estTimeText}</span></div>
           </div>
           <button onClick={runExperiment} disabled={running}
             className="mt-3 bg-green-600 px-4 py-1.5 rounded text-sm w-full disabled:opacity-50">
@@ -402,18 +557,45 @@ export default function Compare() {
         </div>
       </div>
 
-      {/* 运行进度 — 每组合实时步骤状态 (WS) */}
-      {(running || Object.keys(progress).length > 0) && (
+      {/* 运行进度 — 基本信息 (实验 ID/设计/完成进度) + 每组合配置与实时步骤 (WS+轮询) */}
+      {(running || Object.keys(progress).length > 0 || expPoll) && (
         <div className="bg-gray-900 border border-gray-700 rounded p-3">
-          <h4 className="text-sm font-medium mb-2 text-gray-300">⚡ 实验进度</h4>
-          <div className="grid grid-cols-2 gap-2">
-            {Object.entries(progress).map(([cid, p]) => (
-              <div key={cid} className="flex items-center gap-2 text-[11px] bg-gray-800/50 rounded px-2 py-1.5">
-                <span className="text-gray-500 w-20 truncate">{cid}</span>
-                <span className={`${p.status==='failed'?'text-red-400':p.status==='skipped'?'text-yellow-500':'text-gray-300'} truncate flex-1`}>{p.log}</span>
-                {p.status === 'running' && <span className="text-blue-400 animate-pulse">●</span>}
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <h4 className="text-sm font-medium text-gray-300">⚡ 实验进度</h4>
+            <span className="text-[10px] text-gray-500">
+              实验 <span className="text-gray-300 font-mono">{expId || '—'}</span>
+              <span className="text-gray-700 mx-1">·</span>
+              默认设计 <span className="text-gray-300 font-mono">{design}</span>
+              <span className="text-gray-700 mx-1">·</span>
+              组合 <span className="text-gray-300">{Object.keys(comboMeta).length || comboCount}</span>
+            </span>
+          </div>
+          {expPoll && (
+            <div className="flex items-center gap-2 mb-2 text-[11px] text-gray-400">
+              <span className="shrink-0">{expPoll.total ? `已完成 ${expPoll.completed}/${expPoll.total} 组合` : '排队中...'}</span>
+              <div className="flex-1 h-1.5 bg-gray-800 rounded overflow-hidden">
+                <div className="h-full bg-green-500 rounded transition-all duration-500"
+                  style={{ width: `${expPoll.total ? (expPoll.completed / expPoll.total) * 100 : 0}%` }} />
               </div>
-            ))}
+              {running && <span className="text-blue-400 animate-pulse">●</span>}
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-2">
+            {Object.entries(comboMeta).map(([cid, cfg]) => {
+              const p = progress[cid]
+              const backendStatus = expPoll?.statuses?.[cid]
+              return (
+                <div key={cid} className="flex items-center gap-2 text-[11px] bg-gray-800/50 rounded px-2 py-1.5">
+                  <span className="text-gray-300 font-mono truncate flex-1 min-w-0" title={cid}>
+                    {Object.entries(visibleConfig(cfg)).map(([k, v]) => `${k}=${v}`).join(' ') || cid}
+                  </span>
+                  <span className={`${p?.status==='failed'?'text-red-400':p?.status==='skipped'?'text-yellow-500':'text-gray-300'} truncate max-w-[45%]`}>
+                    {p?.log || (backendStatus === 'done' ? '✅ 完成' : backendStatus === 'failed' ? '❌ 失败' : backendStatus === 'running' ? '运行中' : '⏳ 等待')}
+                  </span>
+                  {((p?.status === 'running') || (!p && backendStatus === 'running')) && <span className="text-blue-400 animate-pulse">●</span>}
+                </div>
+              )
+            })}
           </div>
         </div>
       )}
@@ -499,7 +681,7 @@ export default function Compare() {
               <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
                 <h4 className="text-sm font-medium text-blue-300">🔍 组合详情
                   <span className="text-gray-400 font-normal ml-2 text-[11px] font-mono">
-                    {detailEntry ? Object.entries(detailEntry.config || {}).map(([k, v]) => `${k}=${v}`).join('  ') : detailKey}
+                    {detailEntry ? Object.entries(visibleConfig(detailEntry.config || {})).map(([k, v]) => `${k}=${v}`).join('  ') : detailKey}
                   </span>
                 </h4>
                 <button onClick={() => setDetailKey(null)} className="text-gray-500 text-[11px] hover:text-white">✕ 关闭</button>
@@ -544,6 +726,9 @@ export default function Compare() {
                     </tbody>
                   </table>
                   <div className="text-[10px] text-gray-600 mt-1 font-mono">run_id: {detailEntry.result.run_id || '-'} · tool: {detailEntry.result.tool || '-'}</div>
+                  {detailEntry.result.design_version_note && (
+                    <div className="text-[10px] text-yellow-500 mt-0.5">{detailEntry.result.design_version_note}</div>
+                  )}
                 </div>
               )}
             </div>
